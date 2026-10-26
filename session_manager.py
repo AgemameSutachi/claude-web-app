@@ -6,7 +6,7 @@
     - 起動: 使い捨てのランチャーを挟んだ**二段起動**で `claude.exe` を起こし、
       ランチャーが即終了することで本アプリとの親子の鎖を切る。
       独立したコンソール（CREATE_NEW_CONSOLE）を与えるだけでは足りない。
-      server_manager の停止処理は `taskkill /F /T`（プロセスツリー全体）で、
+      常駐の管理アプリの停止処理は `taskkill /F /T`（プロセスツリー全体）で、
       ParentProcessId の鎖を辿って子孫を皆殺しにするため、鎖が繋がったままだと
       **アプリの再起動で全セッションが道連れになる**（2026-08-21 に稼働中
       セッション5本を失った実障害。ダミープロセスで「直接起動は死ぬ・
@@ -103,7 +103,7 @@ EFFORT_CHOICES = [
 
 
 # 起動先の Windows セッション。
-#   0: サービス用のセッション（画面なし）。server_manager 配下の本アプリはここで動く。
+#   0: サービス用のセッション（画面なし）。常駐の管理アプリ配下の本アプリはここで動く。
 #   1: ログオン中のデスクトップ。Chrome 連携・クリップボード・GUI 操作が要る作業向け。
 # 本アプリと違うセッションへは、使い捨てのタスク経由で起動する（_spawn_via_task）。
 # 番号だけではどちらがバックグラウンドか分からないため、表示は役割名を先に出す。
@@ -115,7 +115,7 @@ WIN_SESSION_CHOICES = [
 
 # 起動する claude の権限（Windows の昇格）。値は画面とのやり取り用の名前で、
 # タスクの RunLevel へ写す（ELEVATION_RUN_LEVELS）。空文字は従来どおり本アプリと同じ権限。
-# 2026-10-11 実測: 本アプリ（server_manager 配下・セッション0）は通常権限からは開けない
+# 2026-10-11 実測: 本アプリ（常駐の管理アプリ配下・セッション0）は通常権限からは開けない
 # （昇格している見込み）。デスクトップ(S1)へタスク経由で起こした子は通常権限（Limited）。
 ELEVATION_CHOICES = [
     ("", "既定（起動先の決まりどおり）"),
@@ -414,7 +414,7 @@ def _spawn_detached(argv, cwd, env):
     """本アプリのプロセスツリーから切り離して argv を起動し、pid を返す。
 
     直接 Popen すると起動したプロセスは本アプリの子孫になり、
-    server_manager の停止処理（`taskkill /F /T` ＝ プロセスツリー全体）に
+    常駐の管理アプリの停止処理（`taskkill /F /T` ＝ プロセスツリー全体）に
     巻き込まれて死ぬ（2026-08-21 の実障害）。使い捨てのランチャーを挟み、
     ランチャーが起動報告と同時に終了することで親子の鎖を切る。
 
@@ -895,7 +895,7 @@ def launch_session(
     """本アプリから切り離した独立プロセスとして claude セッションを起動する。
 
     ランチャー経由の二段起動で親子の鎖を切るため、本アプリを終了・再起動
-    しても（server_manager の `taskkill /F /T` でも）セッションは生き続ける。
+    しても（常駐の管理アプリの `taskkill /F /T` でも）セッションは生き続ける。
     起動後の操作は claude.ai 側で行う。
 
     Args:
@@ -2487,7 +2487,7 @@ def read_console_screen_isolated(pid, max_lines=60, timeout=15):
         "import json,sys;"
         "sys.path.insert(0, r'%s');"
         "import session_manager as sm;"
-        # ASCII だけの JSON で返す。本番（server_manager 配下）は PYTHONIOENCODING が無く
+        # ASCII だけの JSON で返す。本番（常駐の管理アプリ配下）は PYTHONIOENCODING が無く
         # 標準出力が cp932 になり、❯ や罫線を書けずに落ちて、結果が空になっていた（2026-10-11 実測）
         "print(json.dumps(sm.read_console_screen(%d, %d), ensure_ascii=True))"
         % (os.path.dirname(os.path.abspath(__file__)), int(pid), int(max_lines))

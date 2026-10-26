@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """別の機械へ配る束（system_update.zip と同じ形）を作る。
 
-共有の CreateUpdateZip.ps1（server_manager の正本から写される）は作業フォルダの
+共有の CreateUpdateZip.ps1（常駐の管理アプリの正本から写される）は作業フォルダの
 ファイルを全部拾うため、本アプリでは projects/（別プロジェクトの作業ツリー）まで
 入ってしまう。ここでは **最後のコミット（HEAD）に載っているものだけ** を束ね、
 次のものは入れない。
@@ -10,7 +10,7 @@
                配った先では、初回の起動で既定値（127.0.0.1 で待ち受け）の settings.json が作られる
     projects/  別プロジェクトの作業ツリー（git では追跡していないので元から入らない）
 
-server_manager の更新の形に合わせ、直下に update_target.txt（"claude-web-app"）と
+常駐の管理アプリの更新の形に合わせ、直下に update_target.txt（"claude-web-app"）と
 commit_message.txt（最後のコミットのメッセージ）を置く。request_self_clear.py
 （区切りの予約の道具）も直下に入る。
 
@@ -30,7 +30,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 束に入れない最上位のフォルダ・ファイル
 EXCLUDE_TOP = ("config", "projects")
 
-# server_manager がどのアプリの更新かを見分ける名前
+# 常駐の管理アプリがどのアプリの更新かを見分ける名前
 TARGET_NAME = "claude-web-app"
 
 # 束に必ず入っていてほしいもの（無ければ束を作らずに止める）

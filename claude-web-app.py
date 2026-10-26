@@ -24,7 +24,7 @@ import usage_tracker
 import auto_clear
 import safe_console
 
-# server_manager 配下では PYTHONIOENCODING が無く、標準出力・標準エラーが cp932 になる。
+# 常駐の管理アプリ配下では PYTHONIOENCODING が無く、標準出力・標準エラーが cp932 になる。
 # 画面の行（❯ など cp932 に無い文字）を print すると UnicodeEncodeError で落ちるため、
 # 書けない文字はバックスラッシュと u で始まる16進の形で書く（日本語は cp932 で書けるのでそのまま。
 # 2026-10-12 評価役の指摘）
@@ -2554,7 +2554,7 @@ def handle_restart_system():
 
 if __name__ == "__main__":
     # 標準出力・標準エラーへ書けなくなっても落ちないようにし、同じ内容をファイルにも残す
-    # （server_manager が再起動すると出力のパイプの読み手が消え、print が OSError を出す。
+    # （常駐の管理アプリが再起動すると出力のパイプの読み手が消え、print が OSError を出す。
     # 2026-10-22 に予約が 500 を返し、自動の区切りの見回りが止まった）
     safe_console.install(os.path.join(sm.APP_STATE_DIR, "server.log"))
 

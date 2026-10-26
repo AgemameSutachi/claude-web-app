@@ -68,7 +68,7 @@ class TestSpawnDetached(unittest.TestCase):
 
     def test_疑似アプリをツリーキルしてもセッション役は生き残る(self):
         """事故の再現実験。_spawn_detached を使う疑似アプリを起こし、
-        server_manager と同じ `taskkill /F /T` で殺して、
+        常駐の管理アプリと同じ `taskkill /F /T` で殺して、
         起動されたセッション役が生き残ることを確かめる。"""
         app_code = (
             "import sys; sys.path.insert(0, {root!r})\n"
@@ -89,7 +89,7 @@ class TestSpawnDetached(unittest.TestCase):
         session_pid = int(app.stdout.readline().strip())
         self._cleanup_pids.append(session_pid)
 
-        # server_manager の停止処理と同じ形でアプリをツリーキルする
+        # 常駐の管理アプリの停止処理と同じ形でアプリをツリーキルする
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(app.pid)],
             capture_output=True,

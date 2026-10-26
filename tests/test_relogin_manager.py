@@ -347,7 +347,7 @@ class TestSenderStdin(unittest.TestCase):
 
 
 class TestOutputWithoutUtf8Env(unittest.TestCase):
-    """本番（server_manager 配下）は PYTHONIOENCODING が無く、子の標準出力が cp932 になる。
+    """本番（常駐の管理アプリ配下）は PYTHONIOENCODING が無く、子の標準出力が cp932 になる。
     そこでも画面の読み取りと送り手の出力が落ちないこと（2026-10-11 本番で、画面が空になった不具合）。"""
 
     def _env(self):
