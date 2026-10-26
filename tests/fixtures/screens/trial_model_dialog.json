@@ -1,0 +1,41 @@
+{
+ "note": "試験用の子。/model の選択ダイアログ（カーソルは選択肢の ❯ 行。上に「❯ /model」と罫線が残る）",
+ "captured": "2026-10-14（session_input_sender.Console の読み取りだけ）",
+ "cursor": [
+  15,
+  2
+ ],
+ "expected_state": "missing",
+ "lines": [
+  "",
+  "✻ Brewed for 3s · done 18:54",
+  "",
+  "❯ /model",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────── autoclear-trial ─",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  Select model",
+  "  Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names,",
+  "  specify with --model.",
+  "",
+  "    1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks",
+  "    2.  Opus 5.5               For complex work and everyday tasks",
+  "    3.  Fable 5.1              For your toughest challenges",
+  "    4.  Sonnet 5.5             Most efficient for simpler tasks",
+  "  ❯ 5.  Haiku 4.5 ✔            Fastest for quick answers",
+  "    6.  Sonnet 5               Efficient for routine tasks",
+  "    7.  Opus 5                 Best for everyday, complex tasks",
+  "  ↓ 8. Fable 5                Most capable for your hardest and longest-running tasks",
+  "     … +5 models",
+  "",
+  "  ○ Effort not supported for Haiku 4.5",
+  "",
+  "  Enter to set as default · s to use this session only · Esc to cancel",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ]
+}

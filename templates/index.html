@@ -1,0 +1,1894 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <!-- スマホ画面でのズーム抑止と最適な描画幅設定 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Claude Code セッション管理</title>
+
+    <!-- Google Fonts (Outfit) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600&display=swap" rel="stylesheet">
+
+    <style>
+        /* プレミアムなダークモードテーマ（従来のターミナル版から踏襲） */
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: #121824;
+            --accent-color: #3b82f6;
+            --text-color: #e2e8f0;
+            --muted-color: #94a3b8;
+            --btn-bg: #1e293b;
+            --btn-active: #334155;
+            --btn-border: #475569;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            min-height: 100vh;
+            min-height: 100dvh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .app-title { font-size: 0.95rem; font-weight: 600; }
+        .app-title span { color: var(--accent-color); }
+
+        .header-tools { display: flex; align-items: center; gap: 6px; }
+
+        .status-badge {
+            font-size: 0.7rem;
+            color: #10b981;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: #10b981;
+        }
+
+        main {
+            flex: 1;
+            padding: 12px;
+            max-width: 720px;
+            width: 100%;
+            margin: 0 auto;
+        }
+
+        .section-title {
+            font-size: 0.72rem;
+            color: var(--muted-color);
+            margin: 4px 2px 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .util-btn {
+            background-color: var(--btn-bg);
+            color: var(--text-color);
+            border: 1px solid var(--btn-border);
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .util-btn:active { background-color: var(--btn-active); }
+
+        .util-btn.danger {
+            background-color: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.4);
+        }
+
+        .util-btn.primary {
+            background-color: rgba(59, 130, 246, 0.25);
+            color: #dbeafe;
+            border-color: var(--accent-color);
+        }
+
+        /* セッションカード */
+        .session-card {
+            background-color: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+
+        .session-head {
+            display: flex;
+            align-items: center;
+            /* バッジが3つ並ぶ（管理者・起動先・状態）と狭い幅で名前が潰れるので折り返す */
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+
+        .session-name {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #fff;
+            word-break: break-all;
+        }
+
+        .session-meta {
+            font-size: 0.7rem;
+            color: var(--muted-color);
+            line-height: 1.6;
+            word-break: break-all;
+        }
+
+        .session-actions { display: flex; gap: 6px; margin-top: 10px; }
+        .session-actions .util-btn { flex: 1; padding: 8px 0; }
+
+        .badge {
+            font-size: 0.65rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 999px;
+            white-space: nowrap;
+        }
+
+        .badge.busy { background-color: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+        .badge.idle { background-color: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .badge.other { background-color: rgba(148, 163, 184, 0.15); color: var(--muted-color); }
+        .badge.external { background-color: rgba(148, 163, 184, 0.12); color: var(--muted-color); }
+        .badge.fail { background-color: rgba(239, 68, 68, 0.2); color: #ef4444; }
+        /* 起動先の Windows セッション（裏で動いているか、デスクトップ側か） */
+        .badge.winbg { background-color: rgba(148, 163, 184, 0.18); color: #cbd5e1; }
+        .badge.windesk { background-color: rgba(168, 85, 247, 0.2); color: #c084fc; }
+        /* 管理者として昇格して動いているセッション */
+        .badge.admin { background-color: rgba(239, 68, 68, 0.18); color: #fca5a5; }
+        .badge.kept { background-color: rgba(34, 197, 94, 0.16); color: #86efac; }
+        .badge.reserved { background-color: rgba(59, 130, 246, 0.16); color: #93c5fd; }
+        .badge.waiting { background-color: rgba(239, 68, 68, 0.2); color: #f87171; }
+
+        /* 人の手を待っているセッション（許可待ち・答え待ち）。押すと claude.ai の画面へ */
+        .session-card.needs-attention { border: 2px solid #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15); }
+        .session-card.maybe-attention { border: 2px dashed #f59e0b; }
+        .attention-bar {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            margin: -2px 0 8px; padding: 8px 10px; border-radius: 8px;
+            background: rgba(239, 68, 68, 0.16); color: #fecaca;
+            font-size: 0.82rem; font-weight: 600; text-decoration: none;
+        }
+        .attention-bar.maybe { background: rgba(245, 158, 11, 0.14); color: #fde68a; }
+        .attention-bar .go { font-size: 0.75rem; white-space: nowrap; }
+
+        /* 今週の使用量と会話の長さ。目安を超えたら色を変える */
+        .usage-line { font-size: 0.72rem; color: var(--muted-color); margin-top: 2px; }
+        .usage-line .warn { color: #fbbf24; font-weight: 600; }
+        .usage-line .hot { color: #f87171; font-weight: 600; }
+        .usage-summary { font-size: 0.68rem; color: var(--muted-color); margin: -4px 2px 8px; line-height: 1.6; }
+
+        /* 送信モーダル */
+        .send-warn { margin: 6px 0 10px; padding: 8px 10px; border-radius: 6px; font-size: 0.72rem; line-height: 1.6;
+                     background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.5); color: #fcd34d; }
+        .check-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; margin: 6px 0; }
+        .check-row input { width: 18px; height: 18px; }
+
+        /* 全セッションへの一斉指示 */
+        .bc-line {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 6px 2px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .bc-line:last-child { border-bottom: none; }
+
+        .bc-name {
+            font-size: 0.8rem;
+            font-weight: 600;
+            word-break: break-all;
+        }
+
+        .empty-box {
+            text-align: center;
+            color: var(--muted-color);
+            font-size: 0.8rem;
+            padding: 28px 12px;
+            border: 1px dashed var(--btn-border);
+            border-radius: 10px;
+            line-height: 1.8;
+        }
+
+        .bottom-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .pj-primary-btn {
+            background: linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%);
+            border: 1px solid #3b82f6;
+            color: #fff;
+            border-radius: 8px;
+            padding: 12px 0;
+            width: 100%;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .pj-primary-btn:active { transform: scale(0.99); }
+        .pj-primary-btn:disabled { opacity: 0.5; }
+
+        .pj-secondary-btn {
+            background-color: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            color: var(--text-color);
+            border-radius: 8px;
+            padding: 12px 0;
+            width: 100%;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        /* モーダル */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background-color: rgba(11, 15, 25, 0.85);
+            backdrop-filter: blur(4px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            padding: 12px;
+        }
+
+        .modal-content {
+            background-color: var(--card-bg);
+            border: 1px solid var(--btn-border);
+            border-radius: 12px;
+            width: 100%;
+            max-width: 420px;
+            padding: 16px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            padding-bottom: 8px;
+        }
+
+        .modal-header h3 { font-size: 1rem; color: #fff; }
+
+        .close-modal-btn {
+            background: none;
+            border: none;
+            color: var(--muted-color);
+            font-size: 1.5rem;
+            cursor: pointer;
+        }
+
+        .pj-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
+
+        .pj-input, .pj-select {
+            flex: 1;
+            background-color: #0f172a;
+            border: 1px solid var(--btn-border);
+            color: var(--text-color);
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 0.85rem;
+            font-family: inherit;
+        }
+
+        .pj-input:focus, .pj-select:focus { outline: 1px solid var(--accent-color); }
+
+        .pj-list { max-height: 46vh; overflow-y: auto; }
+
+        .pj-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            cursor: pointer;
+        }
+
+        .pj-item:active { background-color: rgba(59,130,246,0.1); }
+        .pj-item-main { flex: 1; min-width: 0; }
+        .pj-name { font-size: 0.85rem; font-weight: 600; word-break: break-all; }
+        .pj-meta { font-size: 0.68rem; color: var(--muted-color); word-break: break-all; }
+
+        .pj-badge {
+            background-color: rgba(59,130,246,0.25);
+            color: #dbeafe;
+            font-size: 0.65rem;
+            padding: 2px 7px;
+            border-radius: 999px;
+        }
+
+        .pj-empty { color: var(--muted-color); font-size: 0.78rem; padding: 14px 4px; text-align: center; }
+        .pj-error { font-size: 0.75rem; color: #f59e0b; margin-bottom: 8px; line-height: 1.5; }
+        .pj-hint { font-size: 0.68rem; color: var(--muted-color); line-height: 1.6; margin: 8px 0; }
+        .pj-label { display: block; font-size: 0.72rem; color: var(--muted-color); margin-bottom: 4px; }
+
+        /* 起動オプション（モデル・モード等） */
+        .launch-options { margin: 6px 0 10px; border: 1px solid var(--btn-border); border-radius: 8px; padding: 6px 10px; }
+        .launch-options summary { font-size: 0.72rem; color: var(--muted-color); cursor: pointer; padding: 4px 0; }
+        .launch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+        .launch-grid .pj-select { width: 100%; }
+        .launch-warn { display: none; margin-top: 8px; padding: 8px 10px; border-radius: 6px; font-size: 0.7rem; line-height: 1.6;
+                       background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.5); color: #fca5a5; }
+        .launch-options.danger { border-color: rgba(239,68,68,0.7); }
+        @media (max-width: 420px) { .launch-grid { grid-template-columns: 1fr; } }
+        .pj-section-title { font-size: 0.68rem; color: var(--muted-color); margin: 6px 2px; }
+
+        .back-btn {
+            background: none;
+            border: none;
+            color: var(--accent-color);
+            font-size: 0.8rem;
+            cursor: pointer;
+            font-family: inherit;
+            padding: 0;
+        }
+
+        /* 置き場の選択ボタン */
+        .loc-btn {
+            flex: 1 1 30%;
+            background-color: var(--btn-bg);
+            color: var(--text-color);
+            border: 1px solid var(--btn-border);
+            border-radius: 6px;
+            padding: 8px 6px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .loc-btn.active {
+            background-color: rgba(59, 130, 246, 0.25);
+            border-color: var(--accent-color);
+            color: #dbeafe;
+        }
+
+        .loc-btn .loc-sub {
+            display: block;
+            font-size: 0.62rem;
+            font-weight: 400;
+            color: var(--muted-color);
+            margin-top: 2px;
+        }
+
+        /* 定型文（最初の指示のテンプレート） */
+        .tmpl-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+
+        .tmpl-chip {
+            background-color: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            color: var(--text-color);
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 0.72rem;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .toast {
+            position: fixed;
+            left: 50%;
+            bottom: 18px;
+            transform: translateX(-50%);
+            background-color: #1e293b;
+            border: 1px solid var(--btn-border);
+            color: var(--text-color);
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 0.78rem;
+            z-index: 200;
+            max-width: 90vw;
+            line-height: 1.5;
+        }
+
+        .screen-dump {
+            background-color: #0f172a;
+            border: 1px solid var(--btn-border);
+            border-radius: 6px;
+            padding: 8px;
+            font-family: monospace;
+            font-size: 0.65rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+            color: var(--muted-color);
+            max-height: 30vh;
+            overflow-y: auto;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="app-title">Claude Code <span>セッション管理</span></div>
+        <div class="header-tools">
+            <div class="status-badge"><span class="status-dot"></span><span id="conn-text">接続中</span></div>
+            <a class="util-btn" href="/history" title="送った履歴（起動・/clear・本文・一斉指示）" aria-label="送った履歴" style="text-decoration:none;">📜</a>
+            <a class="util-btn" href="/relogin" title="Claude のログインを更新する" style="text-decoration:none;">🔑</a>
+            <button class="util-btn" onclick="requestSessions()" title="一覧を更新">⟳</button>
+            <button class="util-btn" onclick="restartSystem()" title="このアプリを再起動（セッションは巻き添えになりません）">⚙</button>
+        </div>
+    </header>
+
+    <main>
+        <div class="section-title">
+            <span>稼働中のセッション</span>
+            <span id="session-count">-</span>
+        </div>
+
+        <div id="usage-summary" class="usage-summary" style="display: none;"></div>
+        <div id="sessions-error" class="pj-error" style="display: none;"></div>
+        <div id="sessions-container"></div>
+
+        <div class="section-title" style="margin-top: 18px;">
+            <span>全セッションへ指示（ブロードキャスト）</span>
+        </div>
+
+        <div class="session-card">
+            <textarea id="bc-message" class="pj-input"
+                      placeholder="例) 作業のキリがついたら進捗を README に記録してください"
+                      style="width: 100%; height: 80px; resize: vertical; line-height: 1.5;"></textarea>
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+                <button class="pj-primary-btn" id="bc-submit" style="flex: 1; width: auto;"
+                        onclick="sendBroadcast()">全セッションへ送信</button>
+                <button class="pj-secondary-btn" id="bc-preset" style="flex: 1; width: auto;"
+                        onclick="sendRebootPreset()">🔄 再起動準備</button>
+            </div>
+            <div id="bc-status" style="display: none; margin-top: 10px;"></div>
+            <div class="pj-hint" style="margin-bottom: 0;">
+                稼働中の全セッションに同じメッセージを届けます。作業中のセッションには
+                次の区切りで届きます。「🔄 再起動準備」は、各セッションに作業の保存と
+                再開準備を指示する定型文を送ります。
+            </div>
+        </div>
+
+        <div class="bottom-actions">
+            <button class="pj-primary-btn" onclick="openCreateProject()">＋ 新規プロジェクトを作成して開始</button>
+            <button class="pj-secondary-btn" onclick="openProjectBrowser()">📁 既存プロジェクトで開始 / 整理</button>
+        </div>
+
+        <div class="pj-hint">
+            セッションはこのアプリから切り離して起動されるため、<b>アプリを止めても落ちません</b>。
+            起動後のやり取りは claude.ai 側で行ってください。
+        </div>
+    </main>
+
+    <!-- プロジェクトブラウザ（第1階層：親プロジェクト → 第2階層：サブプロジェクト） -->
+    <div id="project-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="project-modal-title">プロジェクト選択</h3>
+                <button class="close-modal-btn" onclick="hideProjectBrowser()">&times;</button>
+            </div>
+
+            <div id="parent-view">
+                <div class="pj-toolbar">
+                    <input type="text" id="parent-filter" class="pj-input" placeholder="プロジェクト名・チャット内容で検索" oninput="onParentFilterInput()">
+                </div>
+                <div id="search-result-section" style="display: none;">
+                    <div class="pj-section-title">チャット内容の一致</div>
+                    <div id="search-result-list" class="pj-list" style="margin-bottom: 10px;"></div>
+                </div>
+                <div id="created-projects-shortcut" class="pj-item" style="border: 1px solid rgba(59,130,246,0.3); border-radius: 8px; margin-bottom: 8px;" onclick="openCreatedProjects()">
+                    <div class="pj-item-main">
+                        <div class="pj-name">📦 作成したプロジェクト</div>
+                        <div class="pj-meta" id="created-projects-meta">-</div>
+                    </div>
+                    <span class="pj-badge" id="created-projects-badge">0</span>
+                </div>
+                <div class="pj-hint">行をタップすると中のプロジェクト一覧を開きます。▶ でセッションを開始、⇢ で置き場を移動します。</div>
+                <div id="parent-list" class="pj-list"></div>
+            </div>
+
+            <div id="sub-view" style="display: none;">
+                <button class="back-btn" onclick="showParentView()">◀ プロジェクト一覧へ戻る</button>
+                <div class="pj-toolbar" style="margin-top: 8px;">
+                    <input type="text" id="sub-query" class="pj-input" placeholder="名前・チャット内容で検索" oninput="scheduleSubProjectsRequest()">
+                    <select id="sub-sort" class="pj-select" onchange="requestSubProjects()">
+                        <option value="updated">更新日順</option>
+                        <option value="created">作成日順</option>
+                        <option value="name">名前順</option>
+                    </select>
+                </div>
+                <div id="sub-error" class="pj-error" style="display: none;"></div>
+                <div id="sub-list" class="pj-list"></div>
+                <button class="pj-primary-btn" style="margin-top: 10px;" onclick="openCreateProject()">＋ 新規プロジェクトを作成</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- セッション開始モーダル -->
+    <div id="start-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>セッションを開始</h3>
+                <button class="close-modal-btn" onclick="hideStartSession()">&times;</button>
+            </div>
+
+            <div id="start-error" class="pj-error" style="display: none;"></div>
+            <div id="start-screen" class="screen-dump" style="display: none;"></div>
+
+            <div class="pj-hint" style="margin-top: 0;">対象: <span id="start-target-label">-</span></div>
+
+            <label class="pj-label" for="start-resume">会話</label>
+            <select id="start-resume" class="pj-select" style="width: 100%; margin-bottom: 10px;">
+                <option value="">新しい会話を始める</option>
+            </select>
+
+            <label class="pj-label" for="start-prompt">最初の指示（省略可）</label>
+            <div class="tmpl-row" id="start-templates"></div>
+            <textarea id="start-prompt" class="pj-input"
+                      placeholder="例) README を読んで、続きから作業を再開して"
+                      style="width: 100%; height: 90px; resize: vertical; margin-bottom: 8px; line-height: 1.5;"></textarea>
+
+            <div class="pj-hint">
+                起動と同時に claude へ送信されます。以降のやり取りは claude.ai 側で行うか、
+                一覧の「送る」から /clear や次の指示を送ってください。
+            </div>
+
+            <div id="start-launch-options"></div>
+
+            <button class="pj-primary-btn" id="start-submit" onclick="submitStartSession()">セッションを開始</button>
+            <button class="util-btn" style="width: 100%; margin-top: 8px;" onclick="saveTemplateFromPrompt()">この指示を定型文として保存</button>
+        </div>
+    </div>
+
+    <!-- 新規プロジェクト作成モーダル（チャット内容から自動命名） -->
+    <div id="create-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>新規プロジェクト作成</h3>
+                <button class="close-modal-btn" onclick="hideCreateProject()">&times;</button>
+            </div>
+
+            <div id="create-error" class="pj-error" style="display: none;"></div>
+
+            <label class="pj-label" for="create-chat">何を作りますか？（claude への最初の指示）</label>
+            <textarea id="create-chat" class="pj-input"
+                      placeholder="例) 電力使用量を監視して、しきい値を超えたらLINEに通知するツールを作りたい"
+                      style="width: 100%; height: 100px; resize: vertical; margin-bottom: 10px; line-height: 1.5;"
+                      oninput="scheduleNameSuggestion()"></textarea>
+
+            <label class="pj-label" for="create-name">プロジェクト名（入力内容から自動でつきます・編集可）</label>
+            <div class="pj-toolbar">
+                <input type="text" id="create-name" class="pj-input" placeholder="入力すると自動で決まります" oninput="markNameEdited()">
+                <button class="util-btn" onclick="requestNameSuggestion()" title="名前を再生成">🎲</button>
+            </div>
+
+            <label class="pj-label">作成先</label>
+            <div class="pj-toolbar" id="create-location-group" style="flex-wrap: wrap;"></div>
+
+            <div class="pj-hint">
+                作成先: <span id="create-parent-label">-</span><br>
+                作成後、そのプロジェクトでセッションを開始し、上の内容が最初の指示として送信されます。
+            </div>
+
+            <div id="create-launch-options"></div>
+
+            <button class="pj-primary-btn" id="create-submit" onclick="submitCreateProject()">作成して開始</button>
+        </div>
+    </div>
+
+    <!-- 動いているセッションへ /clear と本文を送るモーダル -->
+    <div id="send-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>セッションへ送る</h3>
+                <button class="close-modal-btn" onclick="hideSendModal()">&times;</button>
+            </div>
+
+            <div id="send-error" class="pj-error" style="display: none;"></div>
+            <div class="pj-hint" style="margin-top: 0;">送り先: <b id="send-target-label">-</b></div>
+            <div id="send-unmanaged-warn" class="send-warn" style="display: none;">
+                ⚠ このセッションは<b>このアプリが起こしたものではありません</b>（PC のターミナル等）。
+                人が使っているかもしれないため、入力欄に<b>人の書きかけ</b>があるときは消さずに止まります
+                （作業後に出る次の指示の提案は見分けて上書きします）。
+            </div>
+
+            <label class="check-row"><input type="checkbox" id="send-clear" checked> 先に /clear で会話を空にする</label>
+            <label class="pj-label" for="send-text">本文（省略可・/clear だけでもよい）</label>
+            <textarea id="send-text" class="pj-input"
+                      placeholder="例) README の現在地を読んで、次の作業を始めてください"
+                      style="width: 100%; height: 90px; resize: vertical; margin-bottom: 6px; line-height: 1.5;"></textarea>
+            <label class="check-row"><input type="checkbox" id="send-wait"> 作業中なら、終わるまで待ってから送る（最大2分）</label>
+
+            <div class="pj-hint">
+                入力待ちのときだけ送ります。/clear はプロセスを止めずに文脈だけを空にします
+                （claude.ai の画面はそのまま使えます）。
+            </div>
+
+            <button class="pj-primary-btn" id="send-submit" onclick="submitSend(false)">送る</button>
+            <button class="pj-secondary-btn" id="send-discard" style="display: none; margin-top: 8px;"
+                    onclick="submitSend(true)">入力欄の文字を消して送る</button>
+        </div>
+    </div>
+
+    <!-- プロジェクト移動モーダル -->
+    <div id="move-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>プロジェクトの移動</h3>
+                <button class="close-modal-btn" onclick="hideMoveProject()">&times;</button>
+            </div>
+
+            <div id="move-error" class="pj-error" style="display: none;"></div>
+            <div class="pj-hint" style="margin-bottom: 10px;">対象: <span id="move-target-label">-</span></div>
+
+            <label class="pj-label">移動先</label>
+            <div class="pj-toolbar" id="move-location-group" style="flex-wrap: wrap;"></div>
+
+            <div class="pj-hint">
+                フォルダごと移動します。そのフォルダで動いているセッションは<b>移動前に終了</b>します。<br>
+                移動先に同名のフォルダがある場合は、上書きせず連番を付けます。
+            </div>
+
+            <button class="pj-primary-btn" id="move-submit" onclick="submitMoveProject()">移動する</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script>
+        // サーバーは threading モードで動作しており、websocket トランスポートは
+        // 接続終了時にログノイズを出すため polling に固定する（体感差は無い）。
+        const socket = io({ transports: ['polling'] });
+
+        // 本アプリの画面からの送信だと分かる目印（送った履歴の「どこから」を分けるだけ）
+        const SCREEN_HEADERS = { "Content-Type": "application/json", "X-Claude-Web-App-Screen": "1" };
+
+        /* =====================================================================
+           共通ユーティリティ
+           ===================================================================== */
+
+        function escapeHtml(text) {
+            return String(text === null || text === undefined ? "" : text)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        // onclick 属性の中の文字列リテラルとして安全に埋め込む
+        function jsQuote(text) {
+            return escapeHtml(
+                String(text === null || text === undefined ? "" : text)
+                    .replace(/\\/g, "\\\\")
+                    .replace(/'/g, "\\'")
+            );
+        }
+
+        function shortProjectName(projectKey) {
+            if (!projectKey) return "";
+            const parts = String(projectKey).split("/");
+            return parts[parts.length - 1];
+        }
+
+        function formatDateTime(isoText) {
+            if (!isoText) return "-";
+            const d = new Date(isoText);
+            if (isNaN(d.getTime())) return isoText;
+            const pad = (n) => String(n).padStart(2, "0");
+            return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+
+        // 経過時間を「3分前」「2時間前」のように表す
+        function formatElapsed(epochMs) {
+            if (!epochMs) return "-";
+            const diff = Math.max(0, Date.now() - Number(epochMs));
+            const min = Math.floor(diff / 60000);
+            if (min < 1) return "たった今";
+            if (min < 60) return `${min}分前`;
+            const hour = Math.floor(min / 60);
+            if (hour < 24) return `${hour}時間前`;
+            return `${Math.floor(hour / 24)}日前`;
+        }
+
+        let toastTimer = null;
+        function showToast(message, durationMs = 4000) {
+            let box = document.getElementById("toast-box");
+            if (!box) {
+                box = document.createElement("div");
+                box.id = "toast-box";
+                box.className = "toast";
+                document.body.appendChild(box);
+            }
+            box.innerText = message;
+            box.style.display = "block";
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => { box.style.display = "none"; }, durationMs);
+        }
+
+        socket.on("connect", () => {
+            document.getElementById("conn-text").innerText = "接続中";
+        });
+
+        socket.on("disconnect", () => {
+            document.getElementById("conn-text").innerText = "切断";
+        });
+
+        socket.on("connect_error", () => {
+            // 合言葉の印が切れたときも接続を断られる。開き直せば入口の画面が出る
+            document.getElementById("conn-text").innerText = "接続できません（開き直してください）";
+        });
+
+        socket.on("system_restarting", () => {
+            showToast("アプリを再起動しています。稼働中のセッションはそのままです。");
+        });
+
+        function restartSystem() {
+            if (confirm("このアプリ（Webサーバー）を最新コードで再起動します。\n稼働中の claude セッションは切り離されているため、影響を受けません。")) {
+                socket.emit("restart_system");
+            }
+        }
+
+        /* =====================================================================
+           セッション一覧
+           ===================================================================== */
+
+        let sessions = [];
+
+        function requestSessions() {
+            socket.emit("list_sessions");
+        }
+
+        let usageSummary = null;
+        let autoClearMode = null;
+
+        socket.on("sessions_list", (msg) => {
+            sessions = msg.sessions || [];
+            usageSummary = msg.usage_summary || null;
+            autoClearMode = msg.auto_clear_mode || null;
+            const errorBox = document.getElementById("sessions-error");
+            if (msg.error) {
+                errorBox.style.display = "block";
+                errorBox.innerText = msg.error;
+            } else {
+                errorBox.style.display = "none";
+            }
+            renderSessions();
+        });
+
+        // 状態の表示名。claude 側の status をそのまま見せずに日本語へ置き換える。
+        const STATUS_LABELS = { busy: "作業中", idle: "待機中", shell: "シェル", waiting: "対応待ち" };
+
+        // 推定額（米ドル）を短く出す
+        function formatCost(usd) {
+            if (usd === null || usd === undefined) return "-";
+            return usd >= 100 ? `$${Math.round(usd)}` : `$${Number(usd).toFixed(2)}`;
+        }
+
+        // トークン数を「182k」「1.2M」のように短く出す
+        function formatTokens(n) {
+            if (n === null || n === undefined) return "-";
+            if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+            if (n >= 1e3) return `${Math.round(n / 1e3)}k`;
+            return String(n);
+        }
+
+        // 行の使用量: 「今週 $12.34（8.1%）・文脈 182k」。目安を超えた値だけ色を変える
+        function usageLine(u) {
+            if (!u) return "";
+            const parts = [];
+            if (u.week_cost !== null && u.week_cost !== undefined) {
+                // 目安超えは色だけでなく ▲ と言葉でも示す（スマホでは title が読めないため）
+                const text = `今週 ${formatCost(u.week_cost)}（${u.week_share}%）`;
+                parts.push(u.warn_usage ? `<span class="hot">▲${escapeHtml(text)} 多め</span>` : escapeHtml(text));
+            } else {
+                parts.push("今週 集計中");
+            }
+            if (u.context_tokens !== null && u.context_tokens !== undefined) {
+                const text = `会話の長さ ${formatTokens(u.context_tokens)}`;
+                parts.push(u.warn_context ? `<span class="warn">▲${escapeHtml(text)} 長い</span>` : escapeHtml(text));
+            }
+            return `<div class="usage-line">${parts.join(" ・ ")}</div>`;
+        }
+
+        // 自動の区切り（このアプリが起こしたセッションのうち、文脈が大きいもの・長く止まったもの）
+        const AUTO_CLEAR_MODE_LABELS = {
+            off: "止めています",
+            dry_run: "試し中（当たりを記録するだけで、送っていません）",
+            on: "動いています（このアプリが起こしたセッションで、文脈が大きい・長く止まったものに引き継ぎを書かせてから /clear します）",
+        };
+
+        function renderUsageSummary() {
+            const box = document.getElementById("usage-summary");
+            if (!usageSummary) {
+                // 使用量の集計前でも、自動の区切りの状態は出す
+                if (autoClearMode && AUTO_CLEAR_MODE_LABELS[autoClearMode]) {
+                    box.innerText = `自動の区切り: ${AUTO_CLEAR_MODE_LABELS[autoClearMode]}（「残す」を押した行は区切りません）。`;
+                    box.style.display = "block";
+                } else {
+                    box.style.display = "none";
+                }
+                return;
+            }
+            const start = formatDateTime(usageSummary.week_start);
+            let text = `今週（${start} から）の合計 ${formatCost(usageSummary.total_cost)}（推定・API 換算）。` +
+                `各行の %はこの合計に占める割合、会話の長さはいまの会話が読んでいるトークン数です。` +
+                `${usageSummary.warn_share_percent}% 超と ${formatTokens(usageSummary.warn_context_tokens)} 超には ▲ が付きます。`;
+            if (usageSummary.unknown_models && usageSummary.unknown_models.length) {
+                text += ` 単価の分からないモデルは $0 として数えています: ${usageSummary.unknown_models.join(", ")}`;
+            }
+            if (autoClearMode && AUTO_CLEAR_MODE_LABELS[autoClearMode]) {
+                text += ` 自動の区切り: ${AUTO_CLEAR_MODE_LABELS[autoClearMode]}（「残す」を押した行は区切りません）。`;
+            }
+            box.innerText = text;
+            box.style.display = "block";
+        }
+
+        // 人の手を待っている行の帯。claude.ai の画面があれば、押すとそこへ飛ぶ
+        function attentionBar(s) {
+            const a = s.attention;
+            if (!a) return "";
+            const since = a.since ? `（${formatElapsed(a.since)}から）` : "";
+            const cls = a.certain ? "attention-bar" : "attention-bar maybe";
+            const label = `⚠ ${escapeHtml(a.label)}${escapeHtml(since)}`;
+            if (s.url) {
+                return `<a class="${cls}" href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${label}<span class="go">開いて答える ›</span></a>`;
+            }
+            return `<div class="${cls}">${label}<span class="go">ここからは開けません（PC の画面で答えてください）</span></div>`;
+        }
+
+        // Windows セッション番号は、番号だけだとどちらが裏か分からないので役割名で出す
+        function winSessionName(n) {
+            if (n === null || n === undefined || n === "") return "";
+            return Number(n) === 0 ? "バックグラウンド(S0)" : `デスクトップ(S${n})`;
+        }
+
+        function winSessionBadge(n) {
+            const name = winSessionName(n);
+            if (!name) return "";
+            const cls = Number(n) === 0 ? "winbg" : "windesk";
+            return `<span class="badge ${cls}" title="Windows セッション ${escapeHtml(n)}">${escapeHtml(name)}</span> `;
+        }
+
+        function renderSessions() {
+            const container = document.getElementById("sessions-container");
+            const waitingCount = sessions.filter(s => s.attention).length;
+            document.getElementById("session-count").innerText =
+                waitingCount ? `${sessions.length} 件（対応待ち ${waitingCount}）` : `${sessions.length} 件`;
+            // タブの題名にも待ちの件数を出す（別のタブを見ていても気づけるように）
+            document.title = (waitingCount ? `(${waitingCount}) ` : "") + "Claude Code セッション管理";
+            renderUsageSummary();
+
+            if (sessions.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-box">
+                        稼働中のセッションはありません。<br>
+                        下のボタンからプロジェクトを選んで開始してください。
+                    </div>`;
+                return;
+            }
+
+            container.innerHTML = sessions.map(s => {
+                const statusKey = STATUS_LABELS[s.status] ? s.status : "other";
+                const statusLabel = STATUS_LABELS[s.status] || (s.status || "不明");
+                // 本アプリの管理対象外（PCのターミナル等で起動されたもの）も一覧には出す
+                const place = s.project_key
+                    ? escapeHtml(s.project_key)
+                    : `${escapeHtml(s.cwd)} <span class="badge external">管理対象外</span>`;
+                const cardClass = s.attention
+                    ? (s.attention.certain ? "session-card needs-attention" : "session-card maybe-attention")
+                    : "session-card";
+                return `
+                <div class="${cardClass}">
+                    ${attentionBar(s)}
+                    <div class="session-head">
+                        <div class="session-name">${escapeHtml(s.name || shortProjectName(s.cwd))}</div>
+                        <span>${s.kept ? '<span class="badge kept" title="自動の区切り・起こし直しの対象から外しています">残す</span> ' : ""}${s.clear_reserved ? '<span class="badge reserved">区切り予約済み</span> ' : (s.auto_waiting ? '<span class="badge reserved">自動の区切りを依頼中</span> ' : "")}${s.elevated ? '<span class="badge admin" title="管理者として昇格して動いています">管理者</span> ' : ""}${winSessionBadge(s.win_session)}<span class="badge ${statusKey}">${escapeHtml(statusLabel)}</span></span>
+                    </div>
+                    <div class="session-meta">${place}</div>
+                    <div class="session-meta">開始 ${formatElapsed(s.started_at)} ・ 更新 ${formatElapsed(s.updated_at)} ・ PID ${escapeHtml(s.pid)}</div>
+                    ${usageLine(s.usage)}
+                    <div class="session-actions">
+                        ${s.url
+                            ? `<a class="util-btn primary" style="text-align:center; text-decoration:none; line-height:1.6;" href="${escapeHtml(s.url)}" target="_blank" rel="noopener">claude.ai で開く</a>`
+                            : `<button class="util-btn" disabled title="claude.ai への登録待ちです">リンク準備中</button>`}
+                        <button class="util-btn" onclick="openSendModal('${jsQuote(s.pid)}')" title="/clear と本文を送る">送る</button>
+                        <button class="util-btn" onclick="toggleKeep('${jsQuote(s.pid)}', ${s.kept ? "false" : "true"}, ${s.launched_by_app ? "true" : "false"})"
+                            title="${s.kept ? "残す印を外す（自動の区切りの対象に戻す）" : "自動で区切らずに残す"}">${s.kept ? "残すをやめる" : "残す"}</button>
+                        <button class="util-btn danger" onclick="stopSession('${jsQuote(s.pid)}', '${jsQuote(s.name || '')}')">終了</button>
+                    </div>
+                </div>`;
+            }).join("");
+        }
+
+        // 「残す」印: 付けたセッションは自動の区切り（文脈が大きい・長く止まった）の対象から外れる
+        // 管理外（このアプリが起こしていない）のセッションは、もともと自動では区切らない。
+        // 印は起こし直し（管理用のセッションが管理下へ移す操作）から外すために使う
+        let keepManaged = true;
+        function toggleKeep(pid, kept, managed) {
+            keepManaged = managed;
+            socket.emit("set_keep", { pid: Number(pid), kept: kept });
+        }
+
+        socket.on("keep_result", (msg) => {
+            if (!msg.ok) {
+                showToast(msg.error || "残す印を変えられませんでした。");
+                return;
+            }
+            if (!keepManaged) {
+                showToast(msg.kept
+                    ? "残す印を付けました。このセッションは管理下への起こし直しの対象から外れます。"
+                    : "残す印を外しました。");
+                return;
+            }
+            showToast(msg.kept
+                ? "残す印を付けました。このセッションは自動では区切りません（文脈が大きくなっても /clear されません）。"
+                : "残す印を外しました。文脈が大きい・長く止まったときに、引き継ぎを書かせてから /clear します。");
+        });
+
+        function stopSession(pid, name) {
+            if (!confirm(`セッション「${name || pid}」を終了しますか？\n実行中の作業は中断されます。`)) return;
+            socket.emit("stop_session", { pid: Number(pid) });
+        }
+
+        socket.on("session_stop_result", (msg) => {
+            if (!msg.ok) {
+                showToast(msg.error || "セッションを終了できませんでした。");
+                return;
+            }
+            showToast(`セッション（PID ${msg.pid}）を終了しました。`);
+        });
+
+        /* ---- 動いているセッションへ /clear と本文を送る ----
+           台帳に無い相手（このアプリが起こしていないもの）へは、警告を出し、
+           送る直前にもう一度確かめてから allow_unmanaged を付けて送る。
+           入力欄に文字があって止まったときだけ「消して送る」を出す。 */
+        let sendTarget = null;
+        let sendBusy = false;
+
+        function openSendModal(pid) {
+            const s = sessions.find(x => String(x.pid) === String(pid));
+            if (!s) { showToast("そのセッションは一覧にありません。更新してください。"); return; }
+            sendTarget = s;
+            document.getElementById("send-target-label").innerText =
+                `${s.name || shortProjectName(s.cwd)}（PID ${s.pid}）`;
+            document.getElementById("send-unmanaged-warn").style.display = s.launched_by_app ? "none" : "block";
+            document.getElementById("send-error").style.display = "none";
+            document.getElementById("send-clear").checked = true;
+            document.getElementById("send-text").value = "";
+            document.getElementById("send-wait").checked = false;
+            document.getElementById("send-discard").style.display = "none";
+            setSendBusy(false);
+            document.getElementById("send-modal").style.display = "flex";
+        }
+
+        function hideSendModal() {
+            // 送信中に閉じると、その後の失敗が見えなくなるので閉じさせない
+            if (sendBusy) { showToast("送信中です。結果が出るまでお待ちください。"); return; }
+            document.getElementById("send-modal").style.display = "none";
+            sendTarget = null;
+        }
+
+        function setSendBusy(busy) {
+            sendBusy = busy;
+            const btn = document.getElementById("send-submit");
+            btn.disabled = busy;
+            btn.innerText = busy ? "送信中...（入力欄の確認と記録への反映を待っています）" : "送る";
+            document.getElementById("send-discard").disabled = busy;
+        }
+
+        function showSendError(text) {
+            const box = document.getElementById("send-error");
+            box.style.display = "block";
+            box.innerText = text;
+        }
+
+        async function submitSend(discardDraft) {
+            if (!sendTarget) return;
+            const s = sendTarget;
+            const clear = document.getElementById("send-clear").checked;
+            const text = document.getElementById("send-text").value.trim();
+            if (!clear && !text) { showSendError("/clear か本文のどちらかを指定してください。"); return; }
+            const who = `「${s.name || shortProjectName(s.cwd)}」（PID ${s.pid}）`;
+            if (!s.launched_by_app &&
+                !confirm(`${who} はこのアプリが起こしたセッションではありません。\n本当にこのセッションへ送りますか？`)) return;
+            if (discardDraft &&
+                !confirm(`${who} の入力欄の文字を消してから送ります。\n人が書きかけている文なら失われます。よろしいですか？`)) return;
+
+            const body = { clear: clear, text: text, wait_idle_sec: document.getElementById("send-wait").checked ? 120 : 0 };
+            if (!s.launched_by_app) body.allow_unmanaged = true;
+            if (discardDraft) body.discard_draft = true;
+
+            setSendBusy(true);
+            document.getElementById("send-error").style.display = "none";
+            try {
+                const res = await fetch(`/api/sessions/${encodeURIComponent(s.pid)}/send`, {
+                    method: "POST",
+                    headers: SCREEN_HEADERS,
+                    body: JSON.stringify(body),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || !data.ok) {
+                    // API 向けの言葉（wait_idle_sec 等）は、画面での次の一手に言い換える
+                    let message = data.error || `送れませんでした（HTTP ${res.status}）。`;
+                    if (data.code === "busy" && !body.wait_idle_sec) {
+                        message = "このセッションは作業中です。「作業中なら、終わるまで待ってから送る」に" +
+                                  "チェックを入れて送り直してください。";
+                    } else if (data.code === "busy") {
+                        message = "2分待っても作業が終わらなかったため、送りませんでした。しばらくしてから送り直してください。";
+                    } else if (data.code === "not_managed") {
+                        message = "一覧が古いようです。閉じて ⟳ で一覧を更新してから送り直してください。";
+                    }
+                    showSendError(message);
+                    // /clear だけ済んで本文の前で止まったときは、送り直しで二度 /clear しないよう外す
+                    if (data.cleared === true || String(data.error || "").startsWith("/clear は済みました")) {
+                        document.getElementById("send-clear").checked = false;
+                    }
+                    // 人の書きかけがあって止まったときだけ、消して送る道を出す
+                    document.getElementById("send-discard").style.display =
+                        data.code === "draft_present" ? "block" : "none";
+                    return;
+                }
+                setSendBusy(false);
+                hideSendModal();
+                const r = data.result || {};
+                showToast(r.cleared ? `${who} を /clear して送りました。` : `${who} へ送りました。`);
+                requestSessions();
+            } catch (e) {
+                showSendError(`送れませんでした: ${e}`);
+            } finally {
+                setSendBusy(false);
+            }
+        }
+
+        /* =====================================================================
+           セッション開始
+           ===================================================================== */
+
+        let startTargetKey = null;
+
+        /* ---- 起動オプション（モデル・権限モード・思考の深さ・起動先セッション） ----
+           選択肢はサーバー（session_manager.launch_option_choices）から受け取る。
+           前回の選択は端末ごとに覚えるが、bypassPermissions だけは毎回選び直させる
+           （うっかり全確認なしで起動し続ける事故を防ぐため）。 */
+        const LAUNCH_CHOICES = {{ launch_choices | tojson }};
+        const LAUNCH_FIELDS = [
+            { key: "model", label: "モデル" },
+            { key: "permission_mode", label: "モード" },
+            { key: "effort", label: "思考の深さ" },
+            { key: "win_session", label: "起動先" },
+            { key: "elevation", label: "権限" },
+        ];
+        const ELEVATION_NAMES = { admin: "管理者", standard: "通常" };
+        const LAUNCH_STORAGE_KEY = "claude-web-app.launch-options";
+
+        function loadLaunchPrefs() {
+            try { return JSON.parse(localStorage.getItem(LAUNCH_STORAGE_KEY) || "{}") || {}; }
+            catch (e) { return {}; }
+        }
+
+        function saveLaunchPrefs(options) {
+            const prefs = { ...options };
+            if (prefs.permission_mode === "bypassPermissions") prefs.permission_mode = "";
+            // 管理者での起動も、うっかり続けないよう次回に引き継がない
+            if (prefs.elevation === "admin") prefs.elevation = "";
+            try { localStorage.setItem(LAUNCH_STORAGE_KEY, JSON.stringify(prefs)); } catch (e) { /* 保存できなくても起動は続ける */ }
+        }
+
+        function renderLaunchOptions(prefix) {
+            const prefs = loadLaunchPrefs();
+            if (prefs.permission_mode === "bypassPermissions") prefs.permission_mode = "";
+            if (prefs.elevation === "admin") prefs.elevation = "";
+            const current = LAUNCH_CHOICES.current_win_session;
+            const fields = LAUNCH_FIELDS.map(f => {
+                const options = (LAUNCH_CHOICES[f.key] || []).map(c => {
+                    let label = c.label;
+                    if (f.key === "win_session" && c.value === "" && current != null) label += `＝${winSessionName(current)}`;
+                    const selected = (prefs[f.key] || "") === c.value ? " selected" : "";
+                    return `<option value="${escapeHtml(c.value)}"${selected}>${escapeHtml(label)}</option>`;
+                }).join("");
+                return `<div><label class="pj-label" for="${prefix}-${f.key}">${f.label}</label>
+                        <select id="${prefix}-${f.key}" class="pj-select" onchange="updateLaunchSummary('${prefix}')">${options}</select></div>`;
+            }).join("");
+            document.getElementById(`${prefix}-launch-options`).innerHTML = `
+                <details class="launch-options" id="${prefix}-launch-box">
+                    <summary id="${prefix}-launch-summary">起動オプション</summary>
+                    <div class="launch-grid">${fields}</div>
+                    <div class="pj-hint" style="margin: 6px 0 0;">
+                        権限の「既定」: このアプリと同じ${current != null ? "（" + escapeHtml(winSessionName(current)) + "）" : ""}セッションへは
+                        このアプリと同じ権限（${LAUNCH_CHOICES.current_elevated === true ? "管理者" : LAUNCH_CHOICES.current_elevated === false ? "通常" : "不明"}）、別のセッションへは「通常」で起動します。
+                        このアプリがデスクトップ側で動いているときに、バックグラウンド（セッション0）へ起動すると、保存されたパスワードを
+                        持たない形（S4U）になり、ネットワーク共有や資格情報マネージャーが使えないことがあります（この場合に「通常」を選ぶと、起動時に断られます）。
+                    </div>
+                    <div class="launch-warn" id="${prefix}-launch-warn">
+                        ⚠ <b>bypassPermissions</b> は、ファイル削除やコマンド実行も含めて<b>すべての確認を省略</b>します。
+                        PreToolUse のフックを入れていればそれは効きますが、分類器による判定は行われません。
+                        信頼できる作業にだけ使ってください（この選択は次回に引き継ぎません）。
+                    </div>
+                    <div class="launch-warn" id="${prefix}-admin-warn">
+                        ⚠ <b>管理者</b>で起動すると、claude が実行するコマンドも管理者として動き、
+                        システムの設定やほかの利用者のファイルまで変更できます。管理者が要る作業にだけ使ってください
+                        （この選択は次回に引き継ぎません）。
+                    </div>
+                </details>`;
+            updateLaunchSummary(prefix);
+        }
+
+        function readLaunchOptions(prefix) {
+            const options = {};
+            LAUNCH_FIELDS.forEach(f => {
+                const el = document.getElementById(`${prefix}-${f.key}`);
+                options[f.key] = el ? el.value : "";
+            });
+            return options;
+        }
+
+        // 折りたたんだままでも何を選んでいるか分かるよう、見出しに要約を出す
+        function updateLaunchSummary(prefix) {
+            const options = readLaunchOptions(prefix);
+            const parts = LAUNCH_FIELDS.filter(f => options[f.key]).map(f => {
+                if (f.key === "win_session") return winSessionName(options[f.key]);
+                if (f.key === "elevation") return ELEVATION_NAMES[options[f.key]] || options[f.key];
+                return options[f.key];
+            });
+            // 権限が「既定」でも、このアプリと同じセッションならこのアプリの権限（本番では管理者）で動く。
+            // 畳んだままでも分かるよう、実際に管理者になるときは要約に出す
+            const current = LAUNCH_CHOICES.current_win_session;
+            const sameSession = !options.win_session || (options.win_session === "0") === (current != null && Number(current) === 0);
+            if (!options.elevation && sameSession && LAUNCH_CHOICES.current_elevated === true) {
+                parts.push("権限: 既定＝管理者");
+            }
+            const bypass = options.permission_mode === "bypassPermissions";
+            const admin = options.elevation === "admin";
+            document.getElementById(`${prefix}-launch-summary`).innerText =
+                `起動オプション: ${parts.length ? parts.join(" / ") : "すべて既定"}`;
+            document.getElementById(`${prefix}-launch-warn`).style.display = bypass ? "block" : "none";
+            document.getElementById(`${prefix}-admin-warn`).style.display = admin ? "block" : "none";
+            const box = document.getElementById(`${prefix}-launch-box`);
+            box.classList.toggle("danger", bypass || admin);
+            if (bypass || admin) box.open = true;
+        }
+
+        // 起動ボタンを押したとき用。bypass と管理者は最後にもう一度だけ（まとめて1回）確かめる。
+        function confirmLaunchOptions(options) {
+            const risks = [];
+            if (options.permission_mode === "bypassPermissions") risks.push("bypassPermissions（すべての確認を省略）");
+            if (options.elevation === "admin") risks.push("管理者権限");
+            if (!risks.length) return true;
+            return confirm(`${risks.join(" と ")}で起動します。よろしいですか？`);
+        }
+
+        function openStartSession(projectKey) {
+            if (!projectKey) return;
+            startTargetKey = projectKey;
+            hideProjectBrowser();
+
+            document.getElementById("start-target-label").innerText = projectKey;
+            document.getElementById("start-error").style.display = "none";
+            document.getElementById("start-screen").style.display = "none";
+            document.getElementById("start-prompt").value = "";
+            renderTemplates();
+            renderLaunchOptions("start");
+            const resumeSelect = document.getElementById("start-resume");
+            resumeSelect.innerHTML = `<option value="">新しい会話を始める</option><option value="" disabled>過去の会話を読み込み中...</option>`;
+            socket.emit("list_resumable", { project: projectKey });
+
+            const submitBtn = document.getElementById("start-submit");
+            submitBtn.disabled = false;
+            submitBtn.innerText = "セッションを開始";
+            document.getElementById("start-modal").style.display = "flex";
+        }
+
+        // 過去の会話（resume の候補）。いま動いている会話は選べないようにする
+        socket.on("resumable_list", (msg) => {
+            if (!msg || msg.project !== startTargetKey) return;
+            const select = document.getElementById("start-resume");
+            const head = `<option value="">新しい会話を始める</option>`;
+            if (!msg.ok) {
+                select.innerHTML = head + `<option value="" disabled>${escapeHtml(msg.error || "過去の会話を読めませんでした")}</option>`;
+                return;
+            }
+            const items = msg.items || [];
+            if (!items.length) {
+                select.innerHTML = head + `<option value="" disabled>（再開できる過去の会話はありません）</option>`;
+                return;
+            }
+            select.innerHTML = head + `<optgroup label="続きから再開（新しい順）">` + items.map(it => {
+                // 題名はほぼプロジェクト名（-n で付く）で見分けにならないので、最初の指示を出す
+                const label = `${formatDateTime(new Date(it.updated_at).toISOString())} ${it.first_prompt || it.title || "（指示の記録なし）"}`;
+                const short = label.length > 70 ? label.slice(0, 70) + "…" : label;
+                return `<option value="${escapeHtml(it.session_id)}"${it.live ? " disabled" : ""} title="${escapeHtml(it.title)}">${escapeHtml(short)}${it.live ? "（実行中）" : ""}</option>`;
+            }).join("") + `</optgroup>`;
+        });
+
+        function hideStartSession() {
+            document.getElementById("start-modal").style.display = "none";
+            startTargetKey = null;
+        }
+
+        function submitStartSession() {
+            if (!startTargetKey) return;
+            const promptText = document.getElementById("start-prompt").value.trim();
+            const launchOptions = readLaunchOptions("start");
+            if (!confirmLaunchOptions(launchOptions)) return;
+            saveLaunchPrefs(launchOptions);
+            const submitBtn = document.getElementById("start-submit");
+            submitBtn.disabled = true;
+            submitBtn.innerText = "起動中...（claude.ai への登録を待っています）";
+            document.getElementById("start-error").style.display = "none";
+            document.getElementById("start-screen").style.display = "none";
+            const resumeId = document.getElementById("start-resume").value;
+            socket.emit("start_session", { ...launchOptions, project: startTargetKey, prompt: promptText, resume: resumeId });
+        }
+
+        socket.on("session_start_result", (msg) => {
+            const submitBtn = document.getElementById("start-submit");
+            submitBtn.disabled = false;
+            submitBtn.innerText = "セッションを開始";
+
+            const createBtn = document.getElementById("create-submit");
+            createBtn.disabled = false;
+            createBtn.innerText = "作成して開始";
+
+            if (!msg.ok) {
+                const errorBox = document.getElementById("start-error");
+                errorBox.style.display = "block";
+                errorBox.innerText = msg.error || "セッションの起動に失敗しました。";
+                // 画面に何が出ているか分かるときは、そのまま見せる
+                if (msg.screen && msg.screen.length) {
+                    const dump = document.getElementById("start-screen");
+                    dump.style.display = "block";
+                    dump.innerText = msg.screen.join("\n");
+                }
+                document.getElementById("start-modal").style.display = "flex";
+                requestSessions();
+                return;
+            }
+
+            hideStartSession();
+            hideCreateProject();
+            const session = msg.session || {};
+            const how = msg.resumed ? "続きから再開しました" : "開始しました";
+            // 権限が指定と違ったという注意は守りに関わるので、長めに出す
+            showToast(`セッション「${session.name || ''}」を${how}。claude.ai から操作できます。` +
+                      (msg.warning ? `\n⚠ ${msg.warning}` : ""), msg.warning ? 15000 : 4000);
+            requestSessions();
+            socket.emit("list_parent_projects");
+        });
+
+        /* =====================================================================
+           最初の指示の定型文（旧スニペット機能の流用）
+           ===================================================================== */
+
+        let templates = [];
+
+        socket.on("snippets_list", (msg) => {
+            templates = msg.snippets || [];
+            renderTemplates();
+        });
+
+        function renderTemplates() {
+            const row = document.getElementById("start-templates");
+            if (!row) return;
+            if (templates.length === 0) {
+                row.innerHTML = '<span class="pj-meta">よく使う指示を保存しておくと、ここから入れられます。</span>';
+                return;
+            }
+            row.innerHTML = templates.map(t => `
+                <button class="tmpl-chip" onclick="applyTemplate('${jsQuote(t.command)}')"
+                        oncontextmenu="deleteTemplate('${jsQuote(t.label)}'); return false;">
+                    ${escapeHtml(t.label)}
+                </button>`).join("");
+        }
+
+        function applyTemplate(text) {
+            document.getElementById("start-prompt").value = text;
+        }
+
+        function saveTemplateFromPrompt() {
+            const text = document.getElementById("start-prompt").value.trim();
+            if (!text) {
+                showToast("保存する指示を入力してください。");
+                return;
+            }
+            const label = window.prompt("定型文の名前", text.slice(0, 12));
+            if (!label) return;
+            socket.emit("add_snippet", { label: label, command: text });
+            showToast("定型文として保存しました。（長押しで削除）");
+        }
+
+        function deleteTemplate(label) {
+            if (!confirm(`定型文「${label}」を削除しますか？`)) return;
+            socket.emit("delete_snippet", { label: label });
+        }
+
+        /* =====================================================================
+           プロジェクトブラウザ
+           ===================================================================== */
+
+        let parentProjects = [];
+        let currentParentKey = null;
+        let projectRootKey = null;
+        let projectLocations = [];
+        let selectedCreateLocation = "temp";
+        let moveTargetKey = null;
+        let selectedMoveLocation = null;
+        let subQueryTimer = null;
+        let searchTimer = null;
+
+        socket.on("parent_projects_list", (msg) => {
+            parentProjects = msg.projects || [];
+            projectRootKey = msg.project_root || null;
+            if (msg.locations) projectLocations = msg.locations;
+            renderParentList();
+            renderCreatedProjectsShortcut();
+        });
+
+        socket.on("project_missing", (msg) => {
+            showToast(`プロジェクトが見つかりません: ${msg.project}`);
+            socket.emit("list_parent_projects");
+        });
+
+        function openProjectBrowser() {
+            document.getElementById("project-modal").style.display = "flex";
+            showParentView();
+            socket.emit("list_parent_projects");
+        }
+
+        function hideProjectBrowser() {
+            document.getElementById("project-modal").style.display = "none";
+        }
+
+        function showParentView() {
+            currentParentKey = null;
+            document.getElementById("parent-view").style.display = "block";
+            document.getElementById("sub-view").style.display = "none";
+            document.getElementById("project-modal-title").innerText = "プロジェクト選択";
+            renderParentList();
+        }
+
+        function showSubView(parentKey) {
+            currentParentKey = parentKey;
+            document.getElementById("parent-view").style.display = "none";
+            document.getElementById("sub-view").style.display = "block";
+            document.getElementById("project-modal-title").innerText = shortProjectName(parentKey);
+            document.getElementById("sub-query").value = "";
+            document.getElementById("sub-list").innerHTML = '<div class="pj-empty">読み込み中...</div>';
+            requestSubProjects();
+        }
+
+        function renderCreatedProjectsShortcut() {
+            const root = parentProjects.find(p => p.value === projectRootKey);
+            document.getElementById("created-projects-meta").innerText =
+                projectRootKey ? `${projectRootKey}/projects/` : "作成先が未設定です";
+            document.getElementById("created-projects-badge").innerText = root ? root.sub_count : 0;
+        }
+
+        function openCreatedProjects() {
+            if (projectRootKey) showSubView(projectRootKey);
+        }
+
+        function onParentFilterInput() {
+            renderParentList();
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                const query = document.getElementById("parent-filter").value.trim();
+                socket.emit("search_projects", { query: query });
+            }, 300);
+        }
+
+        function renderParentList() {
+            const container = document.getElementById("parent-list");
+            const filter = (document.getElementById("parent-filter").value || "").toLowerCase();
+            const items = parentProjects.filter(p =>
+                !filter || p.name.toLowerCase().includes(filter) || p.group.toLowerCase().includes(filter)
+            );
+
+            if (items.length === 0) {
+                container.innerHTML = `<div class="pj-empty">${filter
+                    ? "プロジェクト名に一致するものはありません"
+                    : "プロジェクトがありません"}</div>`;
+                return;
+            }
+
+            container.innerHTML = items.map(p => `
+                <div class="pj-item" onclick="showSubView('${jsQuote(p.value)}')">
+                    <div class="pj-item-main">
+                        <div class="pj-name">${escapeHtml(p.name)}</div>
+                        <div class="pj-meta">${escapeHtml(p.group)} ・ 起動 ${p.count} 回</div>
+                    </div>
+                    ${p.sub_count > 0 ? `<span class="pj-badge">${p.sub_count}</span>` : ''}
+                    <button class="util-btn" title="別の置き場へ移動する"
+                            onclick="event.stopPropagation(); openMoveProject('${jsQuote(p.value)}')">⇢</button>
+                    <button class="util-btn primary" title="このプロジェクトでセッションを開始"
+                            onclick="event.stopPropagation(); openStartSession('${jsQuote(p.value)}')">▶</button>
+                </div>
+            `).join("");
+        }
+
+        function requestSubProjects() {
+            if (!currentParentKey) return;
+            socket.emit("list_sub_projects", {
+                parent: currentParentKey,
+                query: document.getElementById("sub-query").value.trim(),
+                sort: document.getElementById("sub-sort").value
+            });
+        }
+
+        function scheduleSubProjectsRequest() {
+            clearTimeout(subQueryTimer);
+            subQueryTimer = setTimeout(requestSubProjects, 300);
+        }
+
+        socket.on("sub_projects_list", (msg) => {
+            if (msg.parent !== currentParentKey) return;
+
+            const errorBox = document.getElementById("sub-error");
+            if (msg.error) {
+                errorBox.style.display = "block";
+                errorBox.innerText = msg.error;
+            } else {
+                errorBox.style.display = "none";
+            }
+
+            const list = msg.projects || [];
+            let html = `
+                <div class="pj-item" onclick="openStartSession('${jsQuote(currentParentKey)}')">
+                    <div class="pj-item-main">
+                        <div class="pj-name">▶ ${escapeHtml(shortProjectName(currentParentKey))}（本体）</div>
+                        <div class="pj-meta">プロジェクト直下でセッションを開始します</div>
+                    </div>
+                </div>`;
+
+            if (list.length === 0) {
+                const query = document.getElementById("sub-query").value.trim();
+                html += `<div class="pj-empty">${query
+                    ? "検索条件に一致するプロジェクトはありません"
+                    : "このプロジェクト内にはまだサブプロジェクトがありません"}</div>`;
+            } else {
+                html += list.map(p => `
+                    <div class="pj-item" onclick="openStartSession('${jsQuote(p.project_key)}')">
+                        <div class="pj-item-main">
+                            <div class="pj-name">${escapeHtml(p.name)}</div>
+                            <div class="pj-meta">更新 ${formatDateTime(p.updated_at)} ・ 作成 ${formatDateTime(p.created_at)}</div>
+                            ${p.summary ? `<div class="pj-meta">${escapeHtml(p.summary)}</div>` : ''}
+                        </div>
+                        <button class="util-btn" title="別の置き場へ移動する"
+                                onclick="event.stopPropagation(); openMoveProject('${jsQuote(p.project_key)}')">⇢</button>
+                    </div>
+                `).join("");
+            }
+
+            document.getElementById("sub-list").innerHTML = html;
+        });
+
+        socket.on("projects_search_result", (msg) => {
+            const section = document.getElementById("search-result-section");
+            const container = document.getElementById("search-result-list");
+            const list = msg.projects || [];
+            const query = document.getElementById("parent-filter").value.trim();
+
+            if (!query || list.length === 0) {
+                section.style.display = "none";
+                container.innerHTML = "";
+                return;
+            }
+
+            section.style.display = "block";
+            container.innerHTML = list.map(p => `
+                <div class="pj-item" onclick="openStartSession('${jsQuote(p.project_key)}')">
+                    <div class="pj-item-main">
+                        <div class="pj-name">${escapeHtml(p.name)}</div>
+                        <div class="pj-meta">${escapeHtml(p.parent_key || '')}</div>
+                        ${p.summary ? `<div class="pj-meta">${escapeHtml(p.summary)}</div>` : ''}
+                    </div>
+                </div>
+            `).join("");
+        });
+
+        /* =====================================================================
+           置き場の選択（一時 / developing / working）
+           ===================================================================== */
+
+        const LOCATION_HINTS = {
+            temp: "作って試す場所",
+            developing: "育ったもの",
+            working: "運用中のもの"
+        };
+
+        function renderLocationButtons(containerId, onlyCreatable, selected, handler) {
+            const container = document.getElementById(containerId);
+            const items = projectLocations.filter(loc => !onlyCreatable || loc.can_create);
+
+            if (items.length === 0) {
+                container.innerHTML = '<div class="pj-empty">置き場の情報を取得中...</div>';
+                return;
+            }
+
+            container.innerHTML = items.map(loc => `
+                <button class="loc-btn ${loc.id === selected ? 'active' : ''}"
+                        onclick="${handler}('${jsQuote(loc.id)}')">
+                    ${escapeHtml(loc.id === 'temp' ? '一時フォルダ' : loc.id)}
+                    <span class="loc-sub">${escapeHtml(LOCATION_HINTS[loc.id] || '')}</span>
+                </button>
+            `).join("");
+        }
+
+        function selectCreateLocation(locationId) {
+            selectedCreateLocation = locationId;
+            renderLocationButtons("create-location-group", true, selectedCreateLocation, "selectCreateLocation");
+            updateCreateParentLabel();
+        }
+
+        function updateCreateParentLabel() {
+            const loc = projectLocations.find(l => l.id === selectedCreateLocation);
+            document.getElementById("create-parent-label").innerText = loc ? loc.label : "取得中...";
+        }
+
+        /* =====================================================================
+           プロジェクトの移動
+           ===================================================================== */
+
+        function openMoveProject(projectKey) {
+            if (!projectKey) return;
+            moveTargetKey = projectKey;
+            selectedMoveLocation = null;
+
+            document.getElementById("move-target-label").innerText = projectKey;
+            document.getElementById("move-error").style.display = "none";
+            renderLocationButtons("move-location-group", false, selectedMoveLocation, "selectMoveLocation");
+
+            const submitBtn = document.getElementById("move-submit");
+            submitBtn.disabled = false;
+            submitBtn.innerText = "移動する";
+            document.getElementById("move-modal").style.display = "flex";
+        }
+
+        function hideMoveProject() {
+            document.getElementById("move-modal").style.display = "none";
+            moveTargetKey = null;
+        }
+
+        function selectMoveLocation(locationId) {
+            selectedMoveLocation = locationId;
+            renderLocationButtons("move-location-group", false, selectedMoveLocation, "selectMoveLocation");
+        }
+
+        function submitMoveProject() {
+            const errorBox = document.getElementById("move-error");
+            if (!moveTargetKey) return;
+            if (!selectedMoveLocation) {
+                errorBox.style.display = "block";
+                errorBox.innerText = "移動先を選んでください。";
+                return;
+            }
+
+            const loc = projectLocations.find(l => l.id === selectedMoveLocation);
+            const label = loc ? loc.label : selectedMoveLocation;
+            if (!confirm(`${moveTargetKey}\nを ${label} へ移動します。\nそのフォルダで動いているセッションは終了します。よろしいですか？`)) {
+                return;
+            }
+
+            const submitBtn = document.getElementById("move-submit");
+            submitBtn.disabled = true;
+            submitBtn.innerText = "移動中...";
+            errorBox.style.display = "none";
+            socket.emit("move_project", { project: moveTargetKey, location: selectedMoveLocation });
+        }
+
+        socket.on("project_move_result", (msg) => {
+            const submitBtn = document.getElementById("move-submit");
+            submitBtn.disabled = false;
+            submitBtn.innerText = "移動する";
+
+            if (!msg.ok) {
+                const errorBox = document.getElementById("move-error");
+                errorBox.style.display = "block";
+                errorBox.innerText = msg.error || "移動に失敗しました。";
+                return;
+            }
+
+            const moved = msg.project;
+            hideMoveProject();
+            let text = `移動しました: ${moved.previous_key} → ${moved.project_key}`;
+            if (moved.renamed) text += `（同名があったため ${moved.name} に改名）`;
+            showToast(text);
+
+            socket.emit("list_parent_projects");
+            if (currentParentKey) requestSubProjects();
+            requestSessions();
+        });
+
+        /* =====================================================================
+           新規プロジェクト作成
+           ===================================================================== */
+
+        let projectNameEdited = false;
+        let nameSuggestTimer = null;
+
+        function openCreateProject() {
+            hideProjectBrowser();
+            projectNameEdited = false;
+            clearTimeout(nameSuggestTimer);
+
+            document.getElementById("create-modal").style.display = "flex";
+            document.getElementById("create-error").style.display = "none";
+            document.getElementById("create-name").value = "";
+            document.getElementById("create-name").placeholder = "入力すると自動で決まります";
+            document.getElementById("create-chat").value = "";
+            // 作成先は毎回「一時フォルダ」から選び直す（前回の選択を引きずらせない）
+            selectedCreateLocation = "temp";
+            renderLocationButtons("create-location-group", true, selectedCreateLocation, "selectCreateLocation");
+            updateCreateParentLabel();
+            renderLaunchOptions("create");
+
+            const submitBtn = document.getElementById("create-submit");
+            submitBtn.disabled = false;
+            submitBtn.innerText = "作成して開始";
+
+            setTimeout(() => document.getElementById("create-chat").focus(), 100);
+        }
+
+        function hideCreateProject() {
+            clearTimeout(nameSuggestTimer);
+            document.getElementById("create-modal").style.display = "none";
+        }
+
+        function markNameEdited() {
+            projectNameEdited = true;
+        }
+
+        // 一文字ごとにLLMを呼ばないよう、入力が落ち着いてから命名を要求する
+        function scheduleNameSuggestion() {
+            if (projectNameEdited) return;
+            clearTimeout(nameSuggestTimer);
+            const text = document.getElementById("create-chat").value.trim();
+            if (text.length < 8) return;
+            nameSuggestTimer = setTimeout(() => requestNameSuggestion(), 900);
+        }
+
+        function requestNameSuggestion() {
+            const text = document.getElementById("create-chat").value.trim();
+            if (!text) {
+                const errorBox = document.getElementById("create-error");
+                errorBox.style.display = "block";
+                errorBox.innerText = "先に、作りたいものを入力してください。";
+                return;
+            }
+
+            const nameInput = document.getElementById("create-name");
+            const submitBtn = document.getElementById("create-submit");
+            nameInput.value = "";
+            nameInput.placeholder = "ローカルLLMが命名中...";
+            submitBtn.disabled = true;
+            submitBtn.innerText = "名前を生成中...";
+            socket.emit("suggest_project_name", { text: text });
+        }
+
+        socket.on("project_name_suggested", (msg) => {
+            const nameInput = document.getElementById("create-name");
+            const submitBtn = document.getElementById("create-submit");
+
+            if (!projectNameEdited) {
+                nameInput.value = msg.name || "";
+            }
+            nameInput.placeholder = "プロジェクト名";
+            submitBtn.disabled = false;
+            submitBtn.innerText = "作成して開始";
+
+            // 一時フォルダの位置だけ最新化する（作成先の表示はモーダルの選択に従う）
+            if (msg.parent) projectRootKey = msg.parent;
+
+            const errorBox = document.getElementById("create-error");
+            if (msg.error) {
+                errorBox.style.display = "block";
+                errorBox.innerText = `⚠ ${msg.error}（仮の名前を入れました。必要に応じて修正してください）`;
+            } else {
+                errorBox.style.display = "none";
+            }
+        });
+
+        function submitCreateProject() {
+            const name = document.getElementById("create-name").value.trim();
+            const chat = document.getElementById("create-chat").value.trim();
+            const errorBox = document.getElementById("create-error");
+
+            if (!chat) {
+                errorBox.style.display = "block";
+                errorBox.innerText = "作りたいものを入力してください。";
+                return;
+            }
+            if (!name) {
+                errorBox.style.display = "block";
+                errorBox.innerText = "プロジェクト名が未設定です。🎲 で生成するか、手入力してください。";
+                return;
+            }
+
+            const launchOptions = readLaunchOptions("create");
+            if (!confirmLaunchOptions(launchOptions)) return;
+            saveLaunchPrefs(launchOptions);
+
+            const submitBtn = document.getElementById("create-submit");
+            submitBtn.disabled = true;
+            submitBtn.innerText = "作成中...";
+            socket.emit("create_project", { ...launchOptions, name: name, chat: chat, location: selectedCreateLocation });
+        }
+
+        socket.on("project_create_result", (msg) => {
+            const submitBtn = document.getElementById("create-submit");
+
+            if (!msg.ok) {
+                submitBtn.disabled = false;
+                submitBtn.innerText = "作成して開始";
+                const errorBox = document.getElementById("create-error");
+                errorBox.style.display = "block";
+                errorBox.innerText = msg.error || "プロジェクトの作成に失敗しました。";
+                return;
+            }
+
+            const project = msg.project;
+            showToast(`プロジェクトを作成しました: ${project.project_key}。セッションを起動しています...`);
+            submitBtn.disabled = true;
+            submitBtn.innerText = "セッションを起動中...";
+            socket.emit("list_parent_projects");
+        });
+
+        /* =====================================================================
+           全セッションへの一斉指示（ブロードキャスト）
+           ===================================================================== */
+
+        let broadcastPollTimer = null;
+
+        function setBroadcastBusy(busy) {
+            const submitBtn = document.getElementById("bc-submit");
+            const presetBtn = document.getElementById("bc-preset");
+            submitBtn.disabled = busy;
+            presetBtn.disabled = busy;
+            submitBtn.innerText = busy ? "実行中..." : "全セッションへ送信";
+        }
+
+        function sendBroadcast() {
+            const text = document.getElementById("bc-message").value.trim();
+            if (!text) {
+                showToast("送信する指示を入力してください。");
+                return;
+            }
+            if (!confirm("稼働中の全セッションへこの指示を送信します。よろしいですか？")) return;
+            postBroadcast({ message: text });
+        }
+
+        function sendRebootPreset() {
+            if (!confirm("再起動準備の定型文を全セッションへ送信します。\n各セッションは作業を保存し、再開できる状態に片付けます。よろしいですか？")) return;
+            postBroadcast({ preset: "reboot" });
+        }
+
+        async function postBroadcast(body) {
+            setBroadcastBusy(true);
+            try {
+                const res = await fetch("/api/broadcast", {
+                    method: "POST",
+                    headers: SCREEN_HEADERS,
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json();
+                if (!res.ok || !data.ok) {
+                    showToast(data.error || `送信できませんでした（HTTP ${res.status}）`);
+                    // 実行中（409）は完了通知で表示が更新されるため、ボタンは実行中のままにする
+                    if (res.status !== 409) setBroadcastBusy(false);
+                    return;
+                }
+                showToast(`一斉指示を開始しました（宛先 ${data.targets.length} 件）`);
+                renderBroadcastJob({ status: "running", targets: data.targets, results: {} });
+                startBroadcastPolling();
+            } catch (e) {
+                showToast(`送信に失敗しました: ${e}`);
+                setBroadcastBusy(false);
+            }
+        }
+
+        function renderBroadcastJob(job) {
+            const box = document.getElementById("bc-status");
+            if (!job) {
+                box.style.display = "none";
+                return;
+            }
+            box.style.display = "block";
+
+            const running = job.status === "running";
+            const header = running
+                ? "実行中...（配送役の claude が各セッションへ送信しています）"
+                : job.status === "done"
+                    ? `完了（${job.finished_at || ""}）`
+                    : `失敗: ${job.error || "原因不明"}`;
+
+            const lines = (job.targets || []).map(name => {
+                const result = (job.results && job.results[name])
+                    || (running ? "送信中..." : "UNKNOWN");
+                const cls = result === "SENT" ? "idle"
+                    : result.startsWith("FAILED") ? "fail"
+                    : running ? "busy" : "other";
+                return `
+                    <div class="bc-line">
+                        <span class="bc-name">${escapeHtml(name)}</span>
+                        <span class="badge ${cls}">${escapeHtml(result)}</span>
+                    </div>`;
+            }).join("");
+
+            box.innerHTML = `<div class="pj-meta" style="margin-bottom: 4px;">${escapeHtml(header)}</div>${lines}`;
+            setBroadcastBusy(running);
+            if (!running) stopBroadcastPolling();
+        }
+
+        function startBroadcastPolling() {
+            stopBroadcastPolling();
+            broadcastPollTimer = setInterval(fetchBroadcastStatus, 5000);
+        }
+
+        function stopBroadcastPolling() {
+            clearInterval(broadcastPollTimer);
+            broadcastPollTimer = null;
+        }
+
+        async function fetchBroadcastStatus() {
+            try {
+                const res = await fetch("/api/broadcast/status");
+                const data = await res.json();
+                if (data.job) {
+                    renderBroadcastJob(data.job);
+                    if (data.job.status === "running" && !broadcastPollTimer) {
+                        startBroadcastPolling();
+                    }
+                }
+            } catch (e) {
+                // 一時的な通信エラーは次のポーリングで拾えるため黙って続ける
+            }
+        }
+
+        // 完了はポーリングを待たず Socket.IO のイベントでも受け取る
+        socket.on("broadcast_result", (job) => renderBroadcastJob(job));
+
+        // 画面を開いたとき、直前の実行結果（あれば）を表示する
+        fetchBroadcastStatus();
+
+        // 経過時間の表示を定期的に更新する（サーバー通信は不要）
+        setInterval(() => { if (sessions.length) renderSessions(); }, 30000);
+    </script>
+</body>
+</html>

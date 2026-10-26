@@ -1,0 +1,22 @@
+[
+    {
+        "label": "git status",
+        "command": "git status"
+    },
+    {
+        "label": "git diff",
+        "command": "git diff"
+    },
+    {
+        "label": "pytest",
+        "command": "python -m pytest"
+    },
+    {
+        "label": "claude",
+        "command": "claude"
+    },
+    {
+        "label": "exit",
+        "command": "exit"
+    }
+]

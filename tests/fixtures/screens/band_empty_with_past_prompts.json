@@ -1,0 +1,41 @@
+{
+ "note": "本物の子 example_project_bravo_ddd（S0）。帯つき・空。上に過去の発言（> /clear 等）が残る",
+ "captured": "2026-10-14（session_input_sender.Console の読み取りだけ）",
+ "cursor": [
+  18,
+  2
+ ],
+ "expected_state": "empty",
+ "lines": [
+  " ▐▛███▛█   Claude Code v2.1.288",
+  "▝▜██████▀  Opus 5.5 (1M context) · Claude Max",
+  " ▝▝   ▝▝   F:\\SharedDrive0\\develop\\developing\\example_project_bravo_ddd",
+  "",
+  "",
+  "> /clear",
+  "",
+  "> 自動の区切りの /clear が済みました。引き継ぎファイル「F:\\SharedDrive0\\develop\\developing\\example_project_bravo_ddd\\RE",
+  "  ADME.md」を読んで、次の依頼を待ってください。返事は不要です。",
+  "",
+  "  Read 1 file (ctrl+o to expand)",
+  "",
+  "●README の引き継ぎを読みました。次の依頼をお待ちしています。",
+  "",
+  "✻ Cooked for 4s · done 18:37",
+  "メモなし                                                                                        メモを編集  ファイル [-]",
+  "",
+  "──────────────────────────────────────────────────────────────────────────────────────────── example_project_bravo_ddd ─",
+  ">",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents                                                             /rc",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ]
+}

@@ -1,0 +1,3 @@
+# エンジンが mod を読んだときに作る型の資料（版ごとに作り直される）
+tsconfig.json
+.claude-plugin/types/

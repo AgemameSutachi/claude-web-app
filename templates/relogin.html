@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Claude ログイン更新</title>
+    <style>
+        /* セッション管理の画面と同じダークの配色 */
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: #121824;
+            --accent-color: #3b82f6;
+            --text-color: #e2e8f0;
+            --muted-color: #94a3b8;
+            --btn-bg: #1e293b;
+            --btn-border: #475569;
+            --ok: #10b981;
+            --warn: #f59e0b;
+            --bad: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg-color); color: var(--text-color);
+            min-height: 100vh; padding: 0 0 24px;
+        }
+        header {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.1);
+            display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+        }
+        header h1 { font-size: 0.95rem; font-weight: 600; }
+        header a { color: var(--accent-color); font-size: 0.8rem; text-decoration: none; }
+        main { max-width: 640px; margin: 0 auto; padding: 14px 16px; }
+        .card { background: var(--card-bg); border: 1px solid var(--btn-border); border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+        .card h2 { font-size: 0.85rem; margin-bottom: 8px; color: var(--muted-color); font-weight: 600; }
+        .big { font-size: 1.05rem; font-weight: 600; }
+        .row { font-size: 0.8rem; color: var(--muted-color); margin-top: 4px; line-height: 1.6; }
+        .small { font-size: 0.7rem; color: var(--muted-color); margin-top: 6px; line-height: 1.5; }
+        .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+        button {
+            width: 100%; padding: 11px; border-radius: 8px; border: 1px solid var(--btn-border);
+            background: var(--btn-bg); color: var(--text-color); font-size: 0.9rem; margin-top: 8px; cursor: pointer;
+        }
+        button.primary { background: var(--accent-color); border-color: var(--accent-color); color: #fff; font-weight: 600; }
+        button.danger { border-color: rgba(239,68,68,0.6); color: #fca5a5; margin-top: 18px; }
+        button:disabled { opacity: 0.5; cursor: default; }
+        .step { font-size: 0.8rem; line-height: 1.7; color: var(--muted-color); }
+        .step b { color: var(--text-color); }
+        .url-box {
+            word-break: break-all; font-family: monospace; font-size: 0.72rem; background: #0f172a;
+            border: 1px solid var(--btn-border); border-radius: 6px; padding: 8px; margin-top: 8px; max-height: 30vh; overflow-y: auto;
+        }
+        .url-box a { color: var(--accent-color); }
+        input[type="text"] {
+            width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--btn-border);
+            background: #0f172a; color: var(--text-color); font-size: 0.9rem; margin-top: 8px; font-family: monospace;
+        }
+        .message { font-size: 0.8rem; line-height: 1.6; margin-top: 10px; white-space: pre-wrap; }
+        .screen {
+            font-family: monospace; font-size: 0.65rem; white-space: pre-wrap; word-break: break-all; color: var(--muted-color);
+            background: #0f172a; border: 1px solid var(--btn-border); border-radius: 6px; padding: 8px; margin-top: 8px; max-height: 30vh; overflow-y: auto;
+        }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Claude ログイン更新（{{ machine_name }}）</h1>
+        <a href="/">← セッション管理へ</a>
+    </header>
+    <main>
+        <div class="card">
+            <h2>いまのログインの期限</h2>
+            <div class="big" id="refresh-expiry">読み込み中...</div>
+            <div class="row" id="refresh-left"></div>
+            <div class="row">この期限が切れると、{{ machine_name }} のすべてのセッションが使えなくなります。切れる前に下の手順で更新してください。</div>
+            <div class="small" id="access-expiry"></div>
+        </div>
+
+        <div class="card">
+            <h2>ログインを更新する</h2>
+            <div class="step">
+                1. <b>「開始」</b>を押すと、{{ machine_name }} でログインの手続きを始め、ログイン用の URL を出します（窓は出ません）。<br>
+                2. URL を開いて Claude にログインし、表示された<b>認証コード</b>をコピーします。<br>
+                3. 下の欄に貼って<b>「コードを送る」</b>を押します。コードはすぐに使い、どこにも残しません。<br>
+                4. 期限が延びれば完了です。<b>「確かめる」</b>で、Claude が応答するかも見られます。
+            </div>
+            <button class="primary" id="btn-start" onclick="startLogin()">開始</button>
+
+            <div id="login-box" class="hidden">
+                <div class="url-box" id="url-box"></div>
+                <form onsubmit="sendCode(); return false;" autocomplete="off">
+                    <input type="text" id="code" placeholder="認証コードを貼り付け" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="send">
+                    <button class="primary" id="btn-code" type="submit">コードを送る</button>
+                </form>
+                <button class="danger" id="btn-cancel" onclick="cancelLogin()">やめる（手続きを閉じる）</button>
+            </div>
+            <div class="message" id="message"></div>
+            <div class="screen hidden" id="screen"></div>
+        </div>
+
+        <div class="card">
+            <h2>確かめる</h2>
+            <div class="step">期限を読み直し、試しに Claude へ1回だけ問い合わせて、いまのログインで応答するかを見ます。数十秒かかります。</div>
+            <button id="btn-check" onclick="checkLogin()">確かめる</button>
+            <div class="message" id="check-message"></div>
+        </div>
+    </main>
+
+    <script>
+        // コードを送る直前の期限（「確かめる」で延びたかを並べて見せる）
+        let refreshBefore = null;
+
+        function fmt(ms) {
+            if (!ms) return "不明";
+            const d = new Date(ms);
+            const pad = n => String(n).padStart(2, "0");
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+
+        function escapeHtml(text) {
+            return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        }
+
+        const MACHINE_NAME = {{ machine_name | tojson }};
+        const NETWORK_HINT = MACHINE_NAME + " に繋がりません。網（Tailscale 等）の接続を確かめて、ページを開き直してください。";
+
+        function renderExpiry(expiry) {
+            // 応答に期限が無い（サーバーの不具合など）ときは、表示を書き換えない
+            if (!expiry) return;
+            const box = document.getElementById("refresh-expiry");
+            const left = document.getElementById("refresh-left");
+            const access = document.getElementById("access-expiry");
+            left.innerText = "";
+            access.innerText = "";
+            if (!expiry.exists) { box.innerText = "資格情報が見つかりません（ログインしていません）"; box.className = "big bad"; return; }
+            if (expiry.error) { box.innerText = expiry.error; box.className = "big bad"; return; }
+            const ms = expiry.refresh_expires_at;
+            box.innerText = ms ? `${fmt(ms)} まで` : "期限を読めませんでした";
+            box.className = "big";
+            if (ms) {
+                const hours = (ms - Date.now()) / 3600000;
+                box.className = `big ${hours < 0 ? "bad" : hours < 72 ? "warn" : "ok"}`;
+                left.innerText = hours < 0 ? "期限が切れています。すぐに更新してください。"
+                    : hours >= 48 ? `あと約 ${(hours / 24).toFixed(1)} 日` : `あと約 ${Math.floor(hours)} 時間`;
+            }
+            access.innerText = `参考: 短期の鍵の期限 ${fmt(expiry.access_expires_at)}（約8時間ごとに自動で更新されます。過ぎていても問題ありません）`;
+        }
+
+        function setBusy(busy) {
+            ["btn-start", "btn-code", "btn-cancel", "btn-check"].forEach(id => document.getElementById(id).disabled = busy);
+        }
+
+        function showMessage(text, cls) {
+            const el = document.getElementById("message");
+            el.innerText = text || "";
+            el.className = `message ${cls || ""}`;
+        }
+
+        function showScreen(lines) {
+            const el = document.getElementById("screen");
+            if (lines && lines.length) { el.innerText = lines.join("\n"); el.classList.remove("hidden"); }
+            else { el.classList.add("hidden"); }
+        }
+
+        function renderLogin(login) {
+            const box = document.getElementById("login-box");
+            if (login && login.active) {
+                box.classList.remove("hidden");
+                document.getElementById("url-box").innerHTML = login.url
+                    ? `ログイン用の URL（タップして開く）:<br><a href="${escapeHtml(login.url)}" target="_blank" rel="noopener">${escapeHtml(login.url)}</a>`
+                    : "URL を取り出せませんでした。「やめる」を押してから、もう一度「開始」を押してください。";
+            } else {
+                box.classList.add("hidden");
+            }
+        }
+
+        async function api(path, body) {
+            const res = await fetch(path, {
+                method: body === undefined ? "GET" : "POST",
+                headers: { "Content-Type": "application/json" },
+                body: body === undefined ? undefined : JSON.stringify(body),
+            });
+            return await res.json().catch(() => ({ ok: false, error: `応答を読めませんでした（HTTP ${res.status}）。ページを開き直してください。` }));
+        }
+
+        async function refresh() {
+            try {
+                const data = await api("/api/relogin");
+                if (!data.expiry) { showMessage(data.error || "期限を読めませんでした。ページを開き直してください。", "bad"); return; }
+                renderExpiry(data.expiry);
+                renderLogin(data.login);
+                if (data.login && data.login.active) {
+                    showMessage("前に始めたログインの手続きが開いています。URL が古いと感じたら「やめる」→「開始」でやり直してください。");
+                }
+            } catch (e) {
+                document.getElementById("refresh-expiry").innerText = "読み込めませんでした";
+                showMessage(NETWORK_HINT, "bad");
+            }
+        }
+
+        async function startLogin() {
+            setBusy(true);
+            showMessage("ログインの手続きを始めています...（1分ほどかかることがあります）");
+            showScreen([]);
+            try {
+                const data = await api("/api/relogin/start", {});
+                if (!data.ok) {
+                    // 失敗したらサーバーが手続きを閉じている
+                    showMessage(`${data.error}\nもう一度「開始」を押してください。続くなら ${MACHINE_NAME} のアプリのログを見てください。`, "bad");
+                    renderLogin({ active: false });
+                    return;
+                }
+                renderLogin({ active: true, url: data.url });
+                if (data.url) {
+                    showMessage("URL を開いてログインし、表示された認証コードを下の欄に貼ってください。");
+                } else {
+                    showMessage("URL を取り出せませんでした。画面の内容を確かめ、「やめる」→「開始」でやり直してください。", "warn");
+                    showScreen(data.screen);
+                }
+            } catch (e) {
+                showMessage(NETWORK_HINT, "bad");
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        async function sendCode() {
+            const input = document.getElementById("code");
+            const code = input.value.trim();
+            if (!code) { showMessage("認証コードを貼ってください。", "warn"); return; }
+            // 送ったら欄はすぐ空にする（画面にコードを残さない）
+            input.value = "";
+            setBusy(true);
+            showMessage("認証コードを送っています...（最大1分ほど）");
+            showScreen([]);
+            try {
+                const data = await api("/api/relogin/code", { code: code });
+                if (data.before_refresh_expires_at) refreshBefore = data.before_refresh_expires_at;
+                renderExpiry(data.expiry);
+                if (!data.ok) {
+                    showMessage(data.message || data.error, "bad");
+                    // 送れなかったときは打つ前の画面、送った後は伏せた画面が入っている
+                    showScreen(data.screen);
+                    // コードを送った手続きはサーバーが閉じている（送れなかったときは開いたまま）
+                    if (data.message) renderLogin({ active: false });
+                    else if (data.status) renderLogin(data.status.login);
+                    return;
+                }
+                showMessage(data.message, "ok");
+                renderLogin({ active: false });
+            } catch (e) {
+                showMessage(NETWORK_HINT, "bad");
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        async function cancelLogin() {
+            setBusy(true);
+            try {
+                const data = await api("/api/relogin/cancel", {});
+                if (!data.ok) { showMessage(data.error || "閉じられませんでした。ページを開き直してください。", "bad"); return; }
+                renderLogin({ active: false });
+                showMessage("ログインの手続きを閉じました。");
+                showScreen([]);
+            } catch (e) {
+                showMessage(NETWORK_HINT, "bad");
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        async function checkLogin() {
+            setBusy(true);
+            const el = document.getElementById("check-message");
+            el.innerText = "確かめています...（数十秒）";
+            el.className = "message";
+            try {
+                const data = await api("/api/relogin/check", {});
+                renderExpiry(data.expiry);
+                const now = data.expiry && data.expiry.refresh_expires_at;
+                const change = refreshBefore && now
+                    ? (now > refreshBefore ? `\n期限: ${fmt(refreshBefore)} → ${fmt(now)}（延びました）` : `\n期限: ${fmt(now)}（延びていません）`)
+                    : "";
+                if (data.ok) {
+                    el.innerText = `応答しました（${data.elapsed_sec} 秒）。いまのログインは使えます。${change}`;
+                    el.className = "message ok";
+                } else {
+                    el.innerText = `応答しませんでした。上の「ログインを更新する」の手順で更新してください。` +
+                        `更新した直後なら、少し待ってからもう一度「確かめる」を押してください。${change}\n詳細: ${data.error || "不明"}`;
+                    el.className = "message bad";
+                }
+            } catch (e) {
+                el.innerText = NETWORK_HINT;
+                el.className = "message bad";
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        // ページを離れるときは、入力欄に貼ったコードを空にする（戻ったときに復元させない）
+        window.addEventListener("pagehide", () => { document.getElementById("code").value = ""; });
+
+        refresh();
+    </script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+    "host": "127.0.0.1",
+    "port": 5002,
+    "allowed_networks": [],
+    "auth_token": "",
+    "allowed_hosts": [],
+    "cors_allowed_origins": null,
+    "machine_name": "",
+    "relogin_enabled": true,
+    "developing_dir": "~/work/developing",
+    "working_dir": "~/work/working",
+    "auto_naming_enabled": true,
+    "project_root": "developing/claude-web-app",
+    "ollama_url": "http://localhost:11434",
+    "ollama_model": "qwen3.5:9b",
+    "ollama_timeout": 60,
+    "claude_exe": "",
+    "auto_clear_mode": "dry_run",
+    "inbox_enabled": true
+}

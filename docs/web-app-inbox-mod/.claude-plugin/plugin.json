@@ -1,0 +1,6 @@
+{
+  "name": "web-app-inbox",
+  "version": "1.0.0",
+  "description": "claude-web-app からの /clear と本文を受け箱（~/.claude-web-app/inbox）で受け取り、打鍵の代わりに $.command.run と $.prompt.submit で渡す",
+  "author": { "name": "claude-web-app" }
+}

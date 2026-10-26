@@ -1,0 +1,41 @@
+{
+ "note": "試験用の子。「/cle」を打って候補メニューが開いた画面（下の罫線は残る。この状態から送ると片付けて届いた）",
+ "captured": "2026-10-14（session_input_sender.Console の読み取りだけ）",
+ "cursor": [
+  12,
+  6
+ ],
+ "expected_state": "draft",
+ "lines": [
+  "  ⎿  Kept model as Haiku 4.5",
+  "",
+  "❯ probe-ok-1 と書いたら OK とだけ返して",
+  "",
+  "●了解しました。",
+  "",
+  "  「probe-ok-1」と書かれたら、「OK」とだけ返します。",
+  "",
+  "✻ Crunched for 2s · done 18:55",
+  "メモなし                                                                                        メモを編集  ファイル [-]",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────── autoclear-trial ─",
+  "❯ /cle",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  /clear                                          Start a new session with empty context; previous session stays on",
+  "                                                  disk (resumable with /resume)",
+  "  /task-handoff-clear                             依頼が1つ片付いたときに、引き継ぎ書を書いてコミットし、自分のセッシ",
+  "                                                  ョンを区切って（/clear）次の世代に続きを渡す手順。区切ってよいとき…",
+  "  /code-review                                    3 free /ultrareview · Review the current diff, or a PR",
+  "                                                  number/branch/path target, for correctness bugs (plus reuse/simplif…",
+  "  /simplify                                       Review the changed code for reuse, simplification, efficiency, and",
+  "                                                  altitude cleanups, then apply the fixes. Quality only — it does not…",
+  "  /doctor                                         Health-check the user's Claude Code setup and fix issues: diagnose",
+  "                                                  installation health — what the `claude doctor` terminal diagnostics…",
+  "  /run-skill-generator                            Author or improve the run-<unit> skill - a per-project skill that",
+  "                                                  tells agents how to build, launch, and drive this project's app. Us…",
+  "  /xlsx                                           Use this skill any time a spreadsheet file is the primary input or",
+  "                                                  output. This means any task where the user wants to: open, read, ed…",
+  "",
+  ""
+ ]
+}

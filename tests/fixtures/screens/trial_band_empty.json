@@ -1,0 +1,41 @@
+{
+ "note": "試験用の子（S0・haiku）。起動直後・帯つき・空（記号は ❯）",
+ "captured": "2026-10-14（session_input_sender.Console の読み取りだけ）",
+ "cursor": [
+  24,
+  2
+ ],
+ "expected_state": "empty",
+ "lines": [
+  " ▐▛███▛█   Claude Code v2.1.288",
+  "▝▜██████▀  Haiku 4.5 · Claude Max",
+  " ▝▝   ▝▝   ~\\AppData\\Local\\Temp\\claude\\F--SharedDrive0-develop-developing-claude-web-app\\0a189917-0127-4515-938f-bc…",
+  "",
+  "",
+  "❯ /clear",
+  "",
+  "❯ 自動の区切りの /clear",
+  "  が済みました。引き継ぎファイル「C:\\Users\\user1\\AppData\\Local\\Temp\\claude\\C--Users-user1-AppData-Local-Temp-claude-F--",
+  "  SharedDrive0-develop-developing-claude-web-app-0a189917-0127-4515-938f-bcf5335b59a7-scratchpad-autoclear-trial\\5dd5b5",
+  "  48-cd8a-4a36-8128-3aa0f83d2b6e\\scratchpad\\handoff.md」を読んで、次の依頼を待ってください。返事は不要です。",
+  "",
+  "●引き継ぎファイルを読みます。",
+  "",
+  "  Read 1 file (ctrl+o to expand)",
+  "",
+  "●了解しました。前のセッションでは依頼がなく待機状態だったので、次の依頼をお待ちしています。",
+  "",
+  "  何かお手伝いできることがあればお知らせください。",
+  "",
+  "✻ Worked for 5s · done 23:41 (月曜日)",
+  "メモなし                                                                                        メモを編集  ファイル [-]",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────── autoclear-trial ─",
+  "❯",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  ⏸ manual mode on · ? for shortcuts · ← for agents                              auto mode unavailable for this model",
+  "                                                                                                                   /rc",
+  "",
+  ""
+ ]
+}

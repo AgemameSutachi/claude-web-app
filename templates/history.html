@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>送った履歴</title>
+    <style>
+        /* セッション管理の画面と同じダークの配色 */
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: #121824;
+            --accent-color: #3b82f6;
+            --text-color: #e2e8f0;
+            --muted-color: #94a3b8;
+            --btn-bg: #1e293b;
+            --btn-border: #475569;
+            --ok: #10b981;
+            --warn: #f59e0b;
+            --bad: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg-color); color: var(--text-color);
+            min-height: 100vh; padding: 0 0 24px;
+        }
+        header {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.1);
+            display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+            position: sticky; top: 0; z-index: 10;
+        }
+        header h1 { font-size: 0.95rem; font-weight: 600; }
+        header a { color: var(--accent-color); font-size: 0.8rem; text-decoration: none; }
+        main { max-width: 720px; margin: 0 auto; padding: 12px 16px; }
+        .toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+        .toolbar input, .toolbar select {
+            background: #0f172a; border: 1px solid var(--btn-border); color: var(--text-color);
+            border-radius: 6px; padding: 8px 10px; font-size: 16px; font-family: inherit;
+        }
+        /* iPhone は 16px 未満の入力欄に触ると画面を拡大するため、入力欄だけ 16px にする */
+        .toolbar input { flex: 1 1 200px; min-width: 0; }
+        .toolbar select { flex: 0 0 auto; }
+        .toolbar button {
+            background: var(--btn-bg); border: 1px solid var(--btn-border); color: var(--text-color);
+            border-radius: 6px; padding: 8px 12px; font-size: 0.85rem; cursor: pointer;
+        }
+        .note { font-size: 0.7rem; color: var(--muted-color); line-height: 1.6; margin-bottom: 10px; }
+        .item {
+            background: var(--card-bg); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
+            padding: 10px 12px; margin-bottom: 8px;
+        }
+        .item.failed { border-color: rgba(239,68,68,0.5); }
+        .item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 4px; }
+        .when { font-size: 0.75rem; color: var(--muted-color); font-variant-numeric: tabular-nums; }
+        .kind {
+            font-size: 0.68rem; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+            background: rgba(59,130,246,0.2); color: #bfdbfe; white-space: nowrap;
+        }
+        .result { font-size: 0.68rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+        .result.ok { background: rgba(16,185,129,0.15); color: var(--ok); }
+        .result.bad { background: rgba(239,68,68,0.2); color: #f87171; }
+        .result.pending { background: rgba(148,163,184,0.15); color: var(--muted-color); }
+        .tag { font-size: 0.65rem; padding: 1px 6px; border-radius: 999px; background: rgba(148,163,184,0.12); color: var(--muted-color); }
+        .tag.unmanaged { background: rgba(245,158,11,0.15); color: #fcd34d; }
+        .to { font-size: 0.85rem; font-weight: 600; word-break: break-all; }
+        .sub { font-size: 0.68rem; color: var(--muted-color); word-break: break-all; line-height: 1.5; }
+        .body {
+            font-size: 0.78rem; line-height: 1.6; margin-top: 6px; white-space: pre-wrap; word-break: break-all;
+            background: #0f172a; border-radius: 6px; padding: 6px 8px;
+        }
+        .error { font-size: 0.72rem; color: #fca5a5; margin-top: 6px; line-height: 1.5; word-break: break-all; }
+        .empty { text-align: center; color: var(--muted-color); font-size: 0.8rem; padding: 28px 12px;
+                 border: 1px dashed var(--btn-border); border-radius: 10px; line-height: 1.8; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>送った履歴</h1>
+        <a href="/">← セッション管理へ</a>
+    </header>
+    <main>
+        <div class="toolbar">
+            <input type="search" id="q" placeholder="宛先・本文・失敗の理由で絞り込み" oninput="scheduleLoad()">
+            <select id="kind" onchange="load()">
+                <option value="">すべての種類</option>
+                {% for key, label in kind_labels.items() %}
+                <option value="{{ key }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+            <select id="result" onchange="load()">
+                <option value="">成否すべて</option>
+                <option value="failed">失敗だけ</option>
+            </select>
+            <button onclick="load()" title="最新にする">⟳</button>
+        </div>
+        <div class="note">
+            このアプリから送ったもの（起動・再開・/clear・本文・一斉指示・区切りの予約）を新しい順に出します。
+            このアプリが起こしていないセッション（印「アプリ外で起動」）へ送ったもの、断られた・失敗したものも含みます。
+            本文は先頭 200 字だけを残し、よく知られた形のトークン等は伏せています。
+        </div>
+        <div id="error" class="error" style="display:none;"></div>
+        <div id="list"><div class="empty">読み込み中...</div></div>
+        <div id="capped" class="note" style="display:none; margin-top: 8px;"></div>
+    </main>
+
+    <script>
+        const KIND_LABELS = {{ kind_labels | tojson }};
+        // 「どこから」の表示名。種類と同じ言葉になるもの（区切りの予約・一斉指示の結果）は出さない
+        const SOURCE_LABELS = { screen: "画面", api: "ほかのプログラム", socket: "画面", auto_clear: "自動の区切り", relaunch: "起こし直し" };
+
+        function escapeHtml(text) {
+            return String(text === null || text === undefined ? "" : text)
+                .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+        }
+
+        function formatWhen(iso) {
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return escapeHtml(iso);
+            const pad = (n) => String(n).padStart(2, "0");
+            return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        }
+
+        function resultBadge(item) {
+            if (item.ok === true) return '<span class="result ok">済</span>';
+            if (item.ok === false) return '<span class="result bad">失敗</span>';
+            return '<span class="result pending">受付（結果は別の行）</span>';
+        }
+
+        // 一斉指示の宛先ごとの結果（SENT / FAILED 理由 / UNKNOWN）を日本語にする
+        function deliveryLabel(value) {
+            const v = String(value || "");
+            if (v.startsWith("SENT")) return "済";
+            if (v.startsWith("FAILED")) return `失敗${v.length > 6 ? "（" + v.slice(6).trim() + "）" : ""}`;
+            return "不明";
+        }
+
+        // 宛先の表示。一斉指示は名前の一覧（結果があれば名前ごとの成否）、それ以外は名前と PID・作業フォルダ
+        function targetHtml(item) {
+            const t = item.target;
+            if (Array.isArray(t)) {
+                const results = (item.detail && item.detail.results) || null;
+                const names = t.map(name => results && results[name] !== undefined
+                    ? `${name}: ${deliveryLabel(results[name])}` : name);
+                return `<div class="to">${escapeHtml(t.length)} 件のセッションへ</div><div class="sub">${escapeHtml(names.join("、"))}</div>`;
+            }
+            if (!t || typeof t !== "object") return '<div class="to">（宛先不明）</div>';
+            const name = t.name || (t.cwd ? t.cwd.split(/[\\/]/).pop() : "") || t.project || "（名前なし）";
+            const tags = [];
+            if (t.managed === false) tags.push('<span class="tag unmanaged">アプリ外で起動</span>');
+            const subs = [];
+            if (t.pid) subs.push(`PID ${escapeHtml(t.pid)}`);
+            if (t.cwd) subs.push(escapeHtml(t.cwd));
+            else if (t.project) subs.push(escapeHtml(t.project));
+            return `<div class="to">${escapeHtml(name)} ${tags.join(" ")}</div>` +
+                (subs.length ? `<div class="sub">${subs.join(" ・ ")}</div>` : "");
+        }
+
+        function render(items, filtered) {
+            const list = document.getElementById("list");
+            if (!items.length) {
+                list.innerHTML = filtered
+                    ? '<div class="empty">絞り込みに当てはまる履歴はありません。</div>'
+                    : '<div class="empty">まだ送った履歴はありません。</div>';
+                return;
+            }
+            list.innerHTML = items.map(item => {
+                const stage = item.detail && item.detail.stage === "finished" ? "（結果）" : "";
+                const source = SOURCE_LABELS[item.source] || "";
+                return `
+                <div class="item ${item.ok === false ? "failed" : ""}">
+                    <div class="item-head">
+                        <span class="when">${formatWhen(item.ts)}</span>
+                        <span class="kind">${escapeHtml((KIND_LABELS[item.kind] || item.kind) + stage)}</span>
+                        ${resultBadge(item)}
+                        ${source ? `<span class="tag">${escapeHtml(source)}から</span>` : ""}
+                    </div>
+                    ${targetHtml(item)}
+                    ${item.text ? `<div class="body">${escapeHtml(item.text)}</div>` : ""}
+                    ${item.error ? `<div class="error">${escapeHtml(item.error)}</div>` : ""}
+                </div>`;
+            }).join("");
+        }
+
+        let loadTimer = null;
+        function scheduleLoad() {
+            clearTimeout(loadTimer);
+            loadTimer = setTimeout(load, 300);
+        }
+
+        // 絞り込みを打ち続けたとき、古い要求の応答が後から届いて新しい結果を上書きしないよう連番で見分ける
+        let loadSeq = 0;
+
+        async function load() {
+            const seq = ++loadSeq;
+            const params = new URLSearchParams({ limit: "300" });
+            const q = document.getElementById("q").value.trim();
+            const kind = document.getElementById("kind").value;
+            const result = document.getElementById("result").value;
+            if (q) params.set("q", q);
+            if (kind) params.set("kind", kind);
+            if (result) params.set("result", result);
+            const errorBox = document.getElementById("error");
+            const capped = document.getElementById("capped");
+            try {
+                const res = await fetch(`/api/history?${params}`);
+                // サーバーが落ちていると JSON でない応答が返る。技術的な文は見せずに言い換える
+                const data = await res.json().catch(() => null);
+                if (seq !== loadSeq) return;
+                if (!data) throw new Error(`サーバーが応答しませんでした（HTTP ${res.status}）`);
+                if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                errorBox.style.display = "none";
+                const items = data.items || [];
+                render(items, Boolean(q || kind || result));
+                capped.style.display = items.length >= (data.limit || 300) ? "block" : "none";
+                capped.innerText = `新しい ${data.limit || 300} 件だけを出しています。古いものは絞り込むと見られます。`;
+            } catch (e) {
+                if (seq !== loadSeq) return;
+                errorBox.innerText = `履歴を読めませんでした: ${e.message || e}`;
+                errorBox.style.display = "block";
+                capped.style.display = "none";
+                document.getElementById("list").innerHTML =
+                    '<div class="empty">読めませんでした。上の ⟳ で読み直してください。</div>';
+            }
+        }
+
+        load();
+    </script>
+</body>
+</html>
