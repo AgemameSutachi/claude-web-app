@@ -8,7 +8,7 @@
 失う実障害が起きたため、ここで実挙動（本物の taskkill）を固定する。
 
 実行方法:
-    <python> -m unittest discover -s tests -v
+    <python> -m pytest tests  （conftest.py の差し替えが効くよう pytest で）
 """
 
 import json
@@ -23,6 +23,7 @@ import unittest
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+import accounts
 import psutil
 
 import session_input_sender
@@ -159,6 +160,20 @@ class TestBuildLaunchArgs(unittest.TestCase):
             ],
         )
 
+    def test_chrome_flag(self):
+        """chrome は真で --chrome・偽で --no-chrome・既定（None）は何も足さない。真偽以外は断る。"""
+        self.assertEqual(sm.build_launch_args(chrome=True), ["--chrome"])
+        self.assertEqual(sm.build_launch_args(chrome=False), ["--no-chrome"])
+        self.assertEqual(sm.build_launch_args(chrome=None), [])
+        self.assertEqual(sm.build_launch_args(), [])
+        self.assertEqual(
+            sm.build_launch_args("haiku", chrome=True), ["--chrome", "--model", "haiku"]
+        )
+        for bad in ("true", 1, "--model"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(sm.SessionError):
+                    sm.build_launch_args(chrome=bad)
+
     def test_unknown_values_are_rejected(self):
         """選択肢に無い値（引数の注入を含む）は SessionError で拒否する。"""
         for kwargs in (
@@ -200,11 +215,15 @@ class TestLaunchSessionArgv(unittest.TestCase):
         )
         sm._spawn_detached = lambda argv, cwd, env: self._capture("direct", argv)
         # 昇格したまま試験を走らせても、本物の起動をしないよう SAFER の経路も代役にする
-        sm._spawn_restricted = lambda argv, cwd: self._capture("restricted", argv)
-        sm._spawn_via_task = lambda argv, cwd, target, run_level="LeastPrivilege": (
-            self._capture(target, argv, run_level)
+        sm._spawn_restricted = lambda argv, cwd, env_overrides=None: self._capture(
+            "restricted", argv
         )
-        sm.ensure_trusted = lambda path: False
+        sm._spawn_via_task = (
+            lambda argv, cwd, target, run_level="LeastPrivilege", env_overrides=None: (
+                self._capture(target, argv, run_level)
+            )
+        )
+        sm.ensure_trusted = lambda path, config_path=None: False
 
     def tearDown(self):
         (
@@ -246,7 +265,9 @@ class TestLaunchSessionArgv(unittest.TestCase):
         """昇格した本アプリから同じセッションへ「通常」は、SAFER で絞ったトークンで起こす。"""
         originals = (sm.process_elevation, sm._spawn_restricted)
         sm.process_elevation = lambda pid: True
-        sm._spawn_restricted = lambda argv, cwd: self._capture("restricted", argv)
+        sm._spawn_restricted = lambda argv, cwd, env_overrides=None: self._capture(
+            "restricted", argv
+        )
         try:
             sm.launch_session(
                 os.getcwd(), claude_exe=sys.executable, elevation="standard"
@@ -275,8 +296,8 @@ class TestLaunchSessionArgv(unittest.TestCase):
             sm.launch_session(os.getcwd(), claude_exe=sys.executable, elevation="root")
         self.assertEqual(self.captured, {})
 
-    def test_resume_uses_resume_flag_without_name(self):
-        """再開は --resume で起こし、-n で元の題名を上書きしない。"""
+    def test_resume_uses_resume_flag_with_name(self):
+        """再開は --resume で起こし、-n でプロジェクト名も渡す（Remote Control の一覧の名前）。"""
         original = sm.validate_resume_target
         sm.validate_resume_target = lambda cwd, session_id: None
         try:
@@ -291,20 +312,69 @@ class TestLaunchSessionArgv(unittest.TestCase):
             )
         finally:
             sm.validate_resume_target = original
+        # 再開は既定で claude.ai の行の題名（表示名）も --remote-control で渡す
         self.assertEqual(
             self.captured["argv"][1:],
-            ["--resume", sid, "--model", "sonnet", "--", "続きをお願いします"],
+            [
+                "--remote-control",
+                "demo",
+                "--resume",
+                sid,
+                "-n",
+                "demo",
+                "--model",
+                "sonnet",
+                "--",
+                "続きをお願いします",
+            ],
         )
         self.assertEqual(result["resumed"], sid)
+        sm.validate_resume_target = lambda cwd, session_id: None
+        try:
+            # "" なら付けない
+            sm.launch_session(
+                os.getcwd(),
+                name="demo",
+                claude_exe=sys.executable,
+                resume_session_id=sid,
+                remote_control_name="",
+            )
+            self.assertEqual(self.captured["argv"][1:], ["--resume", sid, "-n", "demo"])
+            # 新しい会話は既定で付けない（-n の名前で行が作られる）
+            sm.launch_session(os.getcwd(), name="demo", claude_exe=sys.executable)
+            self.assertEqual(self.captured["argv"][1:], ["-n", "demo"])
+        finally:
+            sm.validate_resume_target = original
 
     def test_invalid_resume_target_fails_before_trusting_folder(self):
         called = []
-        sm.ensure_trusted = lambda path: called.append(path)
+        sm.ensure_trusted = lambda path, config_path=None: called.append(path)
         with self.assertRaises(sm.SessionError):
             sm.launch_session(
                 os.getcwd(), claude_exe=sys.executable, resume_session_id="../x"
             )
         self.assertEqual(called, [])
+
+    def test_chrome_goes_before_prompt_separator(self):
+        """chrome=True の --chrome は `--` より前に入り、結果にも chrome が載る。既定では付かない。"""
+        result = sm.launch_session(
+            os.getcwd(),
+            name="demo",
+            prompt="続けて",
+            claude_exe=sys.executable,
+            permission_mode="dontAsk",
+            chrome=True,
+        )
+        argv = self.captured["argv"][1:]
+        self.assertEqual(
+            argv,
+            ["-n", "demo", "--chrome", "--permission-mode", "dontAsk", "--", "続けて"],
+        )
+        self.assertIs(result["chrome"], True)
+        result = sm.launch_session(os.getcwd(), name="demo", claude_exe=sys.executable)
+        self.assertNotIn("--chrome", self.captured["argv"])
+        self.assertNotIn("--no-chrome", self.captured["argv"])
+        self.assertIsNone(result["chrome"])
 
     def test_options_and_prompt_are_placed_in_order(self):
         """オプションは名前の後、指示は `--` の後ろ（`-` 始まりの指示を引数と誤認させない）。"""
@@ -344,7 +414,7 @@ class TestLaunchSessionArgv(unittest.TestCase):
     def test_invalid_option_fails_before_trusting_folder(self):
         """不正な指定では、フォルダの信頼登録（設定ファイルの書き換え）をしない。"""
         called = []
-        sm.ensure_trusted = lambda path: called.append(path)
+        sm.ensure_trusted = lambda path, config_path=None: called.append(path)
         for kwargs in ({"model": "gpt-5"}, {"win_session": "2"}):
             with self.subTest(**kwargs):
                 with self.assertRaises(sm.SessionError):
@@ -438,6 +508,26 @@ class TestResumable(unittest.TestCase):
         self.assertTrue(items[0]["live"])
         self.assertFalse(items[1]["live"])
 
+    def test_headless_conversation_is_marked(self):
+        """無人実行（claude -p）の会話は entrypoint が sdk- で始まる（本物の記録で sdk-cli・対話は cli）。"""
+        a = "55555555-5555-5555-5555-555555555555"
+        b = "66666666-6666-6666-6666-666666666666"
+        self._write(a, [dict(self._user("対話の指示"), entrypoint="cli")], mtime=1000)
+        self._write(
+            b, [dict(self._user("無人の指示"), entrypoint="sdk-cli")], mtime=2000
+        )
+        c = "99999999-0000-0000-0000-000000000000"
+        # entrypoint の無い古い記録は対話の扱い
+        self._write(c, [self._user("古い指示")], mtime=500)
+        items = sm.list_resumable(self.CWD)
+        self.assertEqual(
+            [(i["session_id"], i["headless"]) for i in items],
+            [(b, True), (a, False), (c, False)],
+        )
+        # 既定の続きを選ぶときは、最初の対話の会話で止める（同じ順・同じ範囲）
+        stopped = sm.list_resumable(self.CWD, stop_at_interactive=True)
+        self.assertEqual([i["session_id"] for i in stopped], [b, a])
+
     def test_conversation_started_by_other_session_is_listed(self):
         """/clear の直後に他のセッションからの指示で始まる会話も出し、その本文を見せる。"""
         sid = "77777777-7777-7777-7777-777777777777"
@@ -509,7 +599,7 @@ class TestSpawnRestricted(unittest.TestCase):
     """SAFER の「通常の利用者」トークンで起こせるかを実挙動で検証する（眠るだけの python）。"""
 
     def test_launches_non_elevated_detached_process(self):
-        # 本番の本アプリと同じ置き場なので、試験の前後の差分で後片付けを見る
+        # 置き場は conftest が試験専用のフォルダへ向ける。念のため試験の前後の差分で後片付けを見る
         before = (
             set(os.listdir(sm.TASK_LAUNCH_DIR))
             if os.path.isdir(sm.TASK_LAUNCH_DIR)
@@ -588,15 +678,34 @@ class TestSpawnViaTask(unittest.TestCase):
     def test_launch_into_session1(self):
         self._assert_launched_in("1")
 
-    def test_temporary_tasks_and_files_are_removed(self):
-        """起動に使ったタスクと要求・応答ファイルは残さない。"""
-        pid = sm._spawn_via_task(SLEEPER, os.getcwd(), "1")
-        self._cleanup_pids.append(pid)
+    def _launch_tasks(self):
+        """いま登録されている使い捨ての起動タスクの名前。"""
         listing = subprocess.run(
             ["schtasks", "/query", "/fo", "csv", "/nh"],
             capture_output=True,
         ).stdout.decode("cp932", "replace")
-        self.assertNotIn("claude-web-app-launch-", listing)
+        return {
+            line.split(",")[0].strip('"')
+            for line in listing.splitlines()
+            if "claude-web-app-launch-" in line
+        }
+
+    def test_temporary_tasks_and_files_are_removed(self):
+        """起動に使ったタスクと要求・応答ファイルは残さない。
+
+        受け渡しの置き場は conftest が試験専用のフォルダへ向ける。タスクは本番の 5002 が同じ間に
+        起こしたものと取り違えないよう、試験の前後の差分で見る（2026-11-02）。
+        """
+        before = self._launch_tasks()
+        pid = sm._spawn_via_task(SLEEPER, os.getcwd(), "1")
+        self._cleanup_pids.append(pid)
+        self.assertEqual(self._launch_tasks() - before, set())
+        self.assertNotEqual(
+            os.path.normcase(sm.TASK_LAUNCH_DIR),
+            os.path.normcase(
+                os.path.join(accounts.USER_DIR, ".claude-web-app", "task-launch")
+            ),
+        )
         self.assertEqual(os.listdir(sm.TASK_LAUNCH_DIR), [])
 
     def test_launch_failure_is_reported(self):
@@ -860,6 +969,30 @@ class TestInputAreaAtCursor(unittest.TestCase):
         lines.insert(row + 1, "  second line")
         self.assertEqual(self.area(lines, (row, 1))[0], "draft")
 
+    def test_drifted_down_screen_is_input_area(self):
+        """欄ごと1行下へずれた画面（2026-10-28 実測）: カーソルが上の罫線の行・記号はその下・下の罫線なし。"""
+        lines, cursor, _ = load_screen("drift_down_status2")
+        # 直す前は missing（no_input_area で送れなかった形）。記号の行が空・カーソルが記号の2桁右なので空
+        self.assertEqual(self.area(lines, cursor), ("empty", ""))
+        # 状態行の中身が変わっても欄の文字は変わらない（比べがぶれない）
+        changed = lines[:28] + ["  文脈 15% ・ 5時間枠 5%"] + lines[29:]
+        self.assertEqual(self.area(changed, cursor), ("empty", ""))
+        # カーソルが右にあれば、続きの行に書きかけがありうるので書きかけ（安全側）
+        state, text = self.area(lines, (26, 9))
+        self.assertEqual(state, "draft")
+        self.assertTrue(text.startswith("文脈"))
+        # 記号の行に文字があれば書きかけ（欄の文字は記号の行だけ）
+        typed = lines[:27] + ["> 続きの指示"] + lines[28:]
+        self.assertEqual(self.area(typed, (26, 14)), ("draft", "続きの指示"))
+        # ダイアログの番号つきの選択肢・下に長く続く行は欄にしない
+        option = lines[:27] + ["> 1. Yes"] + lines[28:]
+        self.assertEqual(self.area(option, cursor), ("missing", ""))
+        self.assertEqual(self.area(lines + ["  a", "  b"], cursor), ("missing", ""))
+        # カーソルが記号の行の2行上（罫線でない行）なら打たない
+        self.assertEqual(self.area(lines, (25, 0)), ("missing", ""))
+        # 下に字下げでない行があれば（会話中の引用など）入力欄にしない
+        self.assertEqual(self.area(lines + ["本文"], cursor), ("missing", ""))
+
     def test_cursor_far_from_prompt_is_missing(self):
         """カーソルが入力欄から2行以上離れていれば、入力欄の形があっても打たない。"""
         lines, (row, column), _ = load_screen("band_empty_demo")
@@ -922,6 +1055,142 @@ class TestSenderRefusesWithoutInputArea(unittest.TestCase):
             session_input_sender.send_line(1, "次の指示", settle_sec=0)
         self.assertEqual(ctx.exception.code, "no_input_area")
         self.assertEqual(fake.records, 0)
+
+
+class PhasedScreenConsole(FakeScreenConsole):
+    """書き込みの回数で画面を差し替える代役（0〜1回目: 打つ前・2回目: 本文の後・3回目以降: Enter の後）。"""
+
+    def __init__(self, before, after_text, after_enter):
+        super().__init__(*before)
+        self.screens = [before, before, after_text, after_enter]
+        self.writes = 0
+
+    def write(self, records):
+        super().write(records)
+        self.writes += 1
+
+    def read_screen(self):
+        lines, cursor = self.screens[min(self.writes, 3)]
+        return list(lines), cursor
+
+
+class TestSenderOnDriftedScreen(unittest.TestCase):
+    """欄ごと1行下へずれた画面（2026-10-28 実測）への送信。"""
+
+    def setUp(self):
+        self.original = session_input_sender.Console
+        self.saved = {
+            k: getattr(session_input_sender, k)
+            for k in ("ENTER_CHECK_SEC", "STABLE_POLL_SEC", "STABLE_TIMEOUT_SEC")
+        }
+        session_input_sender.ENTER_CHECK_SEC = 0
+        session_input_sender.STABLE_POLL_SEC = 0
+        session_input_sender.STABLE_TIMEOUT_SEC = 0.05
+
+    def tearDown(self):
+        session_input_sender.Console = self.original
+        for k, v in self.saved.items():
+            setattr(session_input_sender, k, v)
+
+    def send(self, fake):
+        session_input_sender.Console = lambda pid: fake
+        session_input_sender.send_line(1, "次の指示", settle_sec=0)
+
+    def test_stale_prompt_above_drifted_prompt(self):
+        """罫線 / > / > / 状態行（2026-10-28 管理役の送信 d58dea306879 の画面の末尾）: 上の > は描き残し・カーソルはそこ。"""
+        lines, _, _ = load_screen("drift_down_status2")
+        stale = lines[:27] + [">", ">"] + lines[28:]
+        # 直す前は missing（上の罫線の直下が罫線でないため下の > を欄と認めなかった）
+        self.assertEqual(session_input_sender.input_area(stale, (27, 2)), ("empty", ""))
+        typed = lines[:27] + [">", "> 次の指示"] + lines[28:]
+        self.assertEqual(
+            session_input_sender.input_area(typed, (27, 11)), ("draft", "次の指示")
+        )
+        # 上の行が中身のある引用なら描き残しとみなさない
+        quoted = lines[:27] + ["> 引用", ">"] + lines[28:]
+        self.assertEqual(
+            session_input_sender.input_area(quoted, (27, 2)), ("missing", "")
+        )
+        # カーソルが下の > にあれば（ずれていない）描き残しの形として読まない
+        self.assertEqual(
+            session_input_sender.input_area(stale, (28, 2)), ("missing", "")
+        )
+        # 下の罫線がある「罫線 / > / > / 罫線」でカーソルが上の > なら、上を飛ばして下へ打たない
+        rule = lines[26]
+        boxed = lines[:27] + [">", ">", rule] + lines[28:]
+        self.assertEqual(
+            session_input_sender.input_area(boxed, (27, 2)), ("missing", "")
+        )
+
+    def test_stale_text_on_top_rule_of_drifted_prompt(self):
+        """「> 古い文…──── 名前 ─」/ 空の「>」/ 状態行（2026-10-29 example-blog の画面・011b）。"""
+        lines, cursor, expected = load_screen("drift_stale_rule")
+        # 直す前は missing（上の罫線の行が記号と古い文字で始まるので欄と認めなかった）
+        self.assertEqual(session_input_sender.input_area(lines, cursor), (expected, ""))
+        # 記号の行に文字があれば書きかけ（古い提案の文は欄の文字に入れない）
+        typed = lines[:27] + ["> 続きの指示"] + lines[28:]
+        self.assertEqual(
+            session_input_sender.input_area(typed, (26, 14)), ("draft", "続きの指示")
+        )
+        # カーソルが右にあれば、続きの行に書きかけがありうるので書きかけ（安全側）
+        self.assertEqual(session_input_sender.input_area(lines, (26, 9))[0], "draft")
+        # 下に罫線がある（ずれていない）欄で、カーソルが上の行なら欄の外として断る
+        boxed = lines[:28] + ["─" * 120] + lines[28:29]
+        self.assertEqual(
+            session_input_sender.input_area(boxed, cursor), ("missing", "")
+        )
+        # 上の行が罫線で終わらない（ただの引用）なら描き残しとみなさない
+        quoted = lines[:26] + ["> 引用の文です"] + lines[27:]
+        self.assertEqual(
+            session_input_sender.input_area(quoted, cursor), ("missing", "")
+        )
+        # 番号つきの選択肢（ダイアログ）は欄にしない
+        option = lines[:27] + ["> 1. Yes"] + lines[28:]
+        self.assertEqual(
+            session_input_sender.input_area(option, (26, 2)), ("missing", "")
+        )
+        # 短い区切り・名前の形でない行末の行は、描き残しの罫線とみなさない（評価役の合成の画面）
+        for above, below in (
+            ("> 過去の発言 ───", "> 2つ目の過去の発言"),
+            ("> abc ─────────── proj ─", "> Select model"),
+            ("❯ Yes, allow ──────", "❯ No"),
+            ("> 引用 " + "─" * 30 + " 二つの 名前 ─", ">"),
+        ):
+            with self.subTest(above=above):
+                screen = lines[:26] + [above, below] + lines[28:]
+                self.assertEqual(
+                    session_input_sender.input_area(screen, cursor), ("missing", "")
+                )
+        # 名前の無い（罫線だけで終わる）上の罫線の行は認める
+        bare = lines[:26] + ["> 古い提案の文" + "─" * 80, ">"] + lines[28:]
+        self.assertEqual(session_input_sender.input_area(bare, cursor), ("empty", ""))
+
+    def test_send_line_types_into_stale_rule_screen(self):
+        """写しの画面へ送ると、Ctrl+U・本文・Enter を打つ（no_input_area で断らない）。"""
+        lines, cursor, _ = load_screen("drift_stale_rule")
+        typed = lines[:27] + ["> 次の指示"] + lines[28:]
+        after = lines
+        fake = PhasedScreenConsole((lines, cursor), (typed, (26, 11)), (after, cursor))
+        self.send(fake)
+        self.assertEqual(fake.writes, 3)
+
+    def test_wrapped_text_on_drifted_screen_is_draft(self):
+        """本文が折り返してカーソルが続きの行の末尾にあっても、書きかけとして読む（Enter の確かめが働く）。"""
+        lines, _, _ = load_screen("drift_down_status2")
+        wrapped = lines[:27] + ["> " + "あ" * 50, "  " + "い" * 10] + lines[28:]
+        self.assertEqual(
+            session_input_sender.input_area(wrapped, (27, 22)),
+            ("draft", "あ" * 50 + "\n" + "い" * 10),
+        )
+
+    def test_missing_after_typing_presses_enter_once(self):
+        """打った後に欄が読めなければ、Enter を1回だけ打って返す（確かめは呼び手の会話の番号・会話記録）。"""
+        lines, cursor, _ = load_screen("drift_down_status2")
+        before = (lines, cursor)
+        unreadable = (lines, (3, 0))  # カーソルが欄から離れた（読めない）画面
+        fake = PhasedScreenConsole(before, unreadable, unreadable)
+        self.send(fake)
+        self.assertEqual(fake.writes, 3)  # Ctrl+U・本文・Enter 1回（打ち直さない）
 
 
 class TestLaunchedRegistry(unittest.TestCase):
@@ -1109,6 +1378,18 @@ class TestSendToSessionGuards(unittest.TestCase):
         with self.assertRaises(sm.SessionBusyError):
             sm.send_to_session(4242, clear=True)
         self.assertEqual(self.sent, [])
+
+    def test_shell_status_is_input_ready(self):
+        """裏の仕事を持った入力待ち（status=shell）へは送れる。/clear の後も shell のままで確かめが通る。"""
+        self.state["status"] = "shell"
+        self.clear_works = True
+        result = sm.send_to_session(4242, clear=True)
+        self.assertEqual(self.sent, ["/clear"])
+        self.assertTrue(result["cleared"])
+        self.assertTrue(sm.is_input_ready({"status": "idle"}))
+        self.assertFalse(sm.is_input_ready({"status": "busy"}))
+        self.assertFalse(sm.is_input_ready({"status": "waiting"}))
+        self.assertFalse(sm.is_input_ready(None))
 
     def test_busy_session_waits_until_timeout(self):
         self.state["status"] = "busy"

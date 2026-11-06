@@ -6,8 +6,8 @@
     <python> <claude-web-app のフォルダ>/request_self_clear.py
     <python> <claude-web-app のフォルダ>/request_self_clear.py --handoff C:/.../handoff.md
 
---handoff を省くと、その会話のフォルダ（cwd）直下の NOW.md を引き継ぎにする。NOW.md が無く
-README.md があれば README.md（移行中の後ろ盾）。どちらを使ったかは claude-web-app の記録に残る。
+--handoff を省くと、その会話のフォルダ（cwd）直下の NOW.md を引き継ぎにする。NOW.md が無いか
+空（空白だけ）で README.md があれば README.md（移行中の後ろ盾）。どちらを使ったかは claude-web-app の記録に残る。
 予約を入れたらすぐ終わる（待たない）。セッションはそのまま追加の作業をせずにターンを終える。
 ターンが終わって入力待ちが10秒続くと、claude-web-app が /clear を打ち、続けて
 「区切りの /clear が済みました。引き継ぎファイル「<パス>」を読んで、続きから進めてください。」を送る。
@@ -102,7 +102,7 @@ def main(argv=None):
         "--handoff",
         help="引き継ぎファイルのパス（Windows 形式。例 C:/work/handoff.md。"
         "相対なら今のフォルダから。/c/... の形は使えない）。"
-        "省くと、この会話のフォルダ直下の NOW.md（無ければ README.md）",
+        "省くと、この会話のフォルダ直下の NOW.md（無いか空なら README.md）",
     )
     action.add_argument("--cancel", action="store_true", help="予約を取り消す")
     parser.add_argument(
@@ -122,7 +122,7 @@ def main(argv=None):
     if args.cancel:
         method, body = "DELETE", None
     elif args.handoff is None:
-        # 既定の引き継ぎ（会話の cwd 直下の NOW.md、無ければ README.md）はサーバーが選ぶ。
+        # 既定の引き継ぎ（会話の cwd 直下の NOW.md、無いか空なら README.md）はサーバーが選ぶ。
         # シェルの今のフォルダは cd で動いていることがあるため、ここでは探さない
         method, body = "POST", {}
         if args.wait_sec is not None:
@@ -225,7 +225,7 @@ def main(argv=None):
         return EXIT_OK
     source_note = {
         "now": "（--handoff を省いたので NOW.md を使います）",
-        "readme": "（--handoff を省き、NOW.md が無いので README.md を使います）",
+        "readme": "（--handoff を省き、NOW.md が無いか空なので README.md を使います）",
     }.get(result.get("handoff_source"), "")
     quiet_until = result.get("quiet_until")
     if quiet_until:

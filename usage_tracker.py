@@ -2,7 +2,8 @@
 """セッションごとの今週の使用量（推定コスト）と会話の長さを数えるモジュール。
 
 情報源は claude が書く会話記録（``~/.claude/projects/<フォルダ>/<sessionId>.jsonl`` と、
-サブエージェントの ``<sessionId>/subagents/agent-*.jsonl``）。使用量モニター（5006）と
+サブエージェントの ``<sessionId>/subagents/agent-*.jsonl``）。本家でないアカウント（CLAUDE_CONFIG_DIR）の
+projects も数える（置き場の並びは呼び手が渡す・accounts.py）。使用量モニター（5006）と
 同じ数え方をするが、5006 には期間を区切る口が無く「日曜 20:00 からの今週」を出せないため、
 ここで差分読みしながら集計する。
 
@@ -23,7 +24,10 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-CLAUDE_PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+import accounts
+
+# 置き場を渡さないときの既定（本家だけ）。本アプリはアカウントごとの置き場を関数で渡す
+CLAUDE_PROJECTS_DIR = os.path.join(accounts.USER_DIR, ".claude", "projects")
 
 JST = timezone(timedelta(hours=9))
 
@@ -187,11 +191,17 @@ class _FileState:
 
 
 class UsageTracker:
-    """会話記録を差分読みして、会話の番号ごとの今週の使用量を数える。"""
+    """会話記録を差分読みして、会話の番号ごとの今週の使用量を数える。
+
+    Args:
+        projects_dir: 会話記録の置き場（projects フォルダ）1つ。または、数えるたびに呼ぶ関数で、
+            ``[(アカウントの名前, projects フォルダ), ...]`` を返すもの（アカウントごとの合計も出す）
+    """
 
     def __init__(self, projects_dir=CLAUDE_PROJECTS_DIR):
         self.projects_dir = projects_dir
         self._files = {}
+        self._file_account = {}
         self._week_start = None
         self._snapshot = None
         self._context_cache = {}
@@ -210,32 +220,39 @@ class UsageTracker:
             self._files = {}
             self._week_start = start_ts
 
-        pattern_main = os.path.join(self.projects_dir, "*", "*.jsonl")
-        pattern_sub = os.path.join(self.projects_dir, "*", "*", "subagents", "*.jsonl")
-        for path in glob.glob(pattern_main) + glob.glob(pattern_sub):
-            try:
-                stat = os.stat(path)
-            except OSError:
-                continue
-            if stat.st_mtime < start_ts:
-                continue
-            state = self._files.get(path)
-            if state is None or stat.st_size < state.offset:
-                state = self._files[path] = _FileState()
-            if stat.st_size > state.offset:
-                self._read_new(path, state, stat.st_size, start_ts)
+        for account, projects_dir in self._sources():
+            pattern_main = os.path.join(projects_dir, "*", "*.jsonl")
+            pattern_sub = os.path.join(projects_dir, "*", "*", "subagents", "*.jsonl")
+            for path in glob.glob(pattern_main) + glob.glob(pattern_sub):
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                if stat.st_mtime < start_ts:
+                    continue
+                self._file_account[path] = account
+                state = self._files.get(path)
+                if state is None or stat.st_size < state.offset:
+                    state = self._files[path] = _FileState()
+                if stat.st_size > state.offset:
+                    self._read_new(path, state, stat.st_size, start_ts)
 
         per_session = {}
+        per_account = {}
         unknown = set()
         for path, state in self._files.items():
             owner = owner_session_id(path)
             entry = per_session.setdefault(owner, {"cost": 0.0, "tokens": 0})
             entry["cost"] += state.cost
             entry["tokens"] += state.tokens
+            account = self._file_account.get(path)
+            if account:
+                per_account[account] = per_account.get(account, 0.0) + state.cost
             unknown |= state.unknown
         snapshot = {
             "week_start": start.isoformat(timespec="minutes"),
             "per_session": per_session,
+            "per_account": per_account,
             "total_cost": sum(e["cost"] for e in per_session.values()),
             "total_tokens": sum(e["tokens"] for e in per_session.values()),
             "unknown_models": sorted(unknown),
@@ -244,6 +261,20 @@ class UsageTracker:
         with self._lock:
             self._snapshot = snapshot
         return snapshot
+
+    def _sources(self):
+        """数える (アカウントの名前, projects フォルダ) の並び。1つの置き場だけなら名前は None。"""
+        if callable(self.projects_dir):
+            try:
+                return list(self.projects_dir())
+            except (
+                Exception
+            ) as e:  # 置き場の設定が読めなくても数えるのは止めない（前の分は残る）
+                print(
+                    f"[Usage] 会話記録の置き場を決められませんでした: {e}", flush=True
+                )
+                return []
+        return [(None, self.projects_dir)]
 
     def _read_new(self, path, state, size, start_ts):
         try:
@@ -337,9 +368,14 @@ class SessionLineage:
     KEEP_SEC = 8 * 24 * 3600
 
     def __init__(self, path):
-        self.path = path
+        # path は置き場か、使うたびに置き場を返す関数（試験が置き場を差し替えられるように・2026-11-02）
+        self._path = path
         self._data = self._load()
         self._lock = threading.Lock()
+
+    @property
+    def path(self):
+        return self._path() if callable(self._path) else self._path
 
     def _load(self):
         try:
@@ -461,6 +497,9 @@ def summary(tracker, settings=None):
     return {
         "week_start": snapshot["week_start"],
         "total_cost": round(snapshot["total_cost"], 2),
+        "per_account": {
+            k: round(v, 2) for k, v in (snapshot.get("per_account") or {}).items()
+        },
         "total_tokens": snapshot["total_tokens"],
         "unknown_models": snapshot["unknown_models"],
         "refreshed_at": snapshot["refreshed_at"],

@@ -224,6 +224,15 @@ MAX_DRAFT_LINES = 60
 # 罫線とみなす「─」の続く長さ（入力欄の罫線は欄の幅いっぱい。短い区切りと取り違えない）
 MIN_RULE_RUN = 3
 
+# 1行下へずれた欄（_box_at の drifted）の下に許す中身のある行の数（実物の状態行は2行・帯の mod で1行足しうる）
+MAX_DRIFT_ROWS = 3
+
+# ダイアログの番号つきの選択肢（「1. Yes」）。ずれた欄の記号の行がこれなら欄にしない
+NUMBERED_OPTION_PATTERN = re.compile(r"^\d+\.\s")
+
+# 上の罫線の行に前の記号の行が描き残った形（_box_at の stale_rule）の行末: 20字以上の罫線と、右寄せの名前（無いこともある）
+STALE_RULE_TAIL = re.compile(BORDER_CHAR + "{20,}(?: \\S+ " + BORDER_CHAR + ")?$")
+
 # 横に並んだペインとの仕切りに使われうる縦線（ここから右は入力欄ではない）
 PANE_SEPARATORS = "│┃║▏▕"
 
@@ -293,30 +302,58 @@ def _find_mark_line(lines, row):
     return None
 
 
-def _box_at(lines, m, row):
+def _box_at(lines, m, row, column=None):
     """記号の行 m を入力欄として読む。入力欄の形でなければ None。
 
-    row はカーソルの行。下の罫線のある普通の欄では、カーソルが欄の中（記号の行〜続きの行）に
+    row・column はカーソルの行と桁。下の罫線のある普通の欄では、カーソルが欄の中（記号の行〜続きの行）に
     あることを求める。1行のずれを許すのは、下の罫線が消えた崩れた画面だけ。
 
     形の条件（帯やペインが何行あっても変わらない、入力欄そのものの形だけを見る）:
       - すぐ上が罫線（崩れた画面では、記号の重なった罫線）
       - 記号の行と字下げした続きの行の下に罫線（崩れた画面では下の罫線が消えるので、
         下に字下げの行か空行しか無いこと。_is_shifted_input_line と同じ条件）
+    崩れた画面は2つの形を実測した: 上の罫線に記号が重なる形（2026-10-14）と、
+    欄ごと1行下へずれてカーソルが上の罫線の行に残る形（2026-10-28）。後者には描き残しの2形がある:
+    上の罫線と記号の行の間に空の記号の行が挟まる形（stale_above・10-28）と、上の罫線の行の左に
+    ずれる前の記号の行（提案の文など）が残る形（stale_rule・10-29）。
+    限界: stale_rule の描き残しの文は欄の文字に入れない（ずれた後の本当の欄は下の行）。描き残しの文が
+    今の書きかけかは画面から見分けられないが、ずれた画面で claude が描き直すのは下の行なので空と読む。
     横にペインが並んでいれば、罫線の幅で切ってから読む。
     """
     if m == 0:
         return None
     above = lines[m - 1]
     shifted = _is_overlapped_rule(above)
-    if not (_is_rule(above) or shifted):
+    # ずれる前の記号の描き残し（中身の無い記号だけの行）が上の罫線との間に挟まった形
+    # （罫線 / > / > / 状態行。2026-10-28 管理役の送信 d58dea306879 の画面の末尾）。
+    # カーソルは描き残しの行に残る（claude が思う記号の行）ので、下の記号の行を欄として読む
+    stale_above = (
+        m >= 2
+        and m == row + 1
+        and _mark_rest(above) is not None
+        and not _mark_rest(above).strip("\xa0 ")
+        and _is_rule(lines[m - 2])
+    )
+    # ずれる前の記号の行（提案の文など）が、上の罫線の行の左に描き残った形。罫線と右寄せの名前は右に残る
+    # （「> 古い文…──── 名前 ─」/ 空の「>」/ 状態行。2026-10-29 example-blog の画面・011b）。
+    # カーソルはその罫線の行（claude が思う記号の行）にあるので、下の空の記号の行を欄として読む
+    # 罫線は欄の幅いっぱいに長く（実物は約60字）、行末は右寄せの名前（「─ 名前 ─」）か罫線そのもの。
+    # 会話の引用・選択肢の行の短い区切り（「> 過去の発言 ───」）と取り違えないよう、形を狭く取る（評価役の指摘）
+    stale_rule = (
+        not shifted
+        and m == row + 1
+        and _mark_rest(above) is not None
+        and bool(STALE_RULE_TAIL.search(above.rstrip(" \xa0")))
+    )
+    if not (_is_rule(above) or shifted or stale_above or stale_rule):
         return None
     # 欄の幅は下の罫線（無ければ上の罫線）で決める
     j = m + 1
     while j < len(lines) and lines[j].startswith("  ") and lines[j].strip():
         j += 1
     has_bottom = j < len(lines) and _is_rule(lines[j])
-    columns = _rule_columns(lines[j] if has_bottom else above)
+    top_rule = lines[m - 2] if stale_above else above
+    columns = _rule_columns(lines[j] if has_bottom else top_rule)
     box = [_cut_columns(line, columns) if columns else line for line in lines]
     content = _mark_rest(box[m]).strip("\xa0 ")
     if has_bottom:
@@ -327,14 +364,44 @@ def _box_at(lines, m, row):
             continued
         )
         return ("draft" if has_draft else "empty"), "\n".join([content] + continued)
-    if not shifted:
+    # 1行下へずれた画面: カーソル（claude が思う記号の行）は上の罫線の行にあり、記号はその1行下、
+    # 下の罫線は状態行に上書きされて消える（2026-10-28 実測・account_b の子で送信の約6割が
+    # no_input_area になった形。画面バッファが30行でスクロールの余白が無い子だけで起きた）
+    # ずれた画面では実際に打つ位置はカーソルの1行下。それが記号の行〜字下げした続きの行の中にあること
+    # （本文が折り返すとカーソルは続きの行の末尾に行く・評価役の指摘）
+    actual = row + 1
+    drifted = (
+        (_is_rule(above) or stale_above or stale_rule)
+        and not shifted
+        and m <= actual < len(lines)
+        and all(
+            line.startswith("  ") and line.strip() for line in lines[m + 1 : actual + 1]
+        )
+    )
+    if not (shifted or drifted):
         return None
     below = box[m + 1 :]
     if not all(not line.strip() or line.startswith("  ") for line in below):
         return None
+    rows = [line.strip() for line in below if line.strip()]
+    if drifted:
+        # 打つ位置までの続きの行は書きかけの文字、その下は状態行（見分けられないので文字には入れない）
+        continued = [line.strip() for line in box[m + 1 : actual + 1]]
+        status_rows = [line.strip() for line in box[actual + 1 :] if line.strip()]
+        # ダイアログの番号つきの選択肢（「> 1. Yes」）や、下に長く続く行（状態行は実物で2行）は欄にしない
+        if NUMBERED_OPTION_PATTERN.match(content) or len(status_rows) > MAX_DRIFT_ROWS:
+            return None
+        # 欄の文字は記号の行から打つ位置までにする（状態行の使用率が書き換わっても、
+        # 提案の見分け・Enter の確かめの比べがぶれないように）。空かどうかはカーソルの位置で決める:
+        # 記号の行が空でカーソルが記号の2桁右なら空。それより右なら、打つ位置の下に書きかけがありうる（安全側）。
+        # 限界: 人が複数行の書きかけの先頭（空の1行目）へカーソルを戻していると空と読む（合成の画面で確かめた）
+        if (content and not PLACEHOLDER_PATTERN.match(content)) or continued:
+            return "draft", "\n".join([content] + continued)
+        if column is not None and column <= 2:
+            return "empty", ""
+        return "draft", "\n".join(status_rows)
     # 崩れた画面では続きの行と状態行を見分けられない。下の中身のある行が2行以上なら
     # 複数行の書きかけかもしれないので書きかけとみなす（安全側。input_area の注記と同じ）
-    rows = [line.strip() for line in below if line.strip()]
     if len(rows) > 1:
         return "draft", "\n".join([content] + rows)
     if content and not PLACEHOLDER_PATTERN.match(content):
@@ -354,14 +421,14 @@ def _input_area_at_cursor(lines, cursor):
     開いた直後に実測）。そのペインが文字の hotkey を持てば、打った文字がボタンを押しうる。
     これは画面からは見分けられない。
     """
-    row, _column = cursor
+    row, column = cursor
     if not 0 <= row < len(lines):
         return "missing", ""
     for start in (row, row - 1, row + 1):
         m = _find_mark_line(lines, start)
         if m is None:
             continue
-        found = _box_at(lines, m, row)
+        found = _box_at(lines, m, row, column)
         if found is not None:
             return found
     return "missing", ""
@@ -556,8 +623,14 @@ def send_line(pid, text, settle_sec=0.8, prefix="", keep_draft=False, check_only
         # 入力欄に残り、会話記録には載らなかった）。そこで、本文が入力欄に描かれて
         # 画面が落ち着くのを待ってから、Enter を別に打つ。
         wait_screen_stable(console)
-        _, _, typed = look(console)
+        _, typed_state, typed = look(console)
         enter = key_records("\r", VK_RETURN)
+        if typed_state == "missing":
+            # 打った後の欄が読めない（描画のずれ・/clear の候補メニュー等）。打った文字が残っているかを
+            # 比べられないので、Enter は1回だけ打って返す（打ち直さない＝提案を送らない）。
+            # 送れたかは呼び手が確かめる（/clear は会話の番号の変化、本文は会話記録・評価役3周目の指摘）
+            console.write(enter)
+            return
         for _ in range(ENTER_RETRY):
             console.write(enter)
             time.sleep(ENTER_CHECK_SEC)

@@ -4,7 +4,7 @@
 追加パッケージを必要としないよう、標準ライブラリの unittest で記述している。
 
 実行方法:
-    <python> -m unittest discover -s tests -v
+    <python> -m pytest tests  （conftest.py の差し替えが効くよう pytest で）
 """
 
 import importlib.util
@@ -366,6 +366,121 @@ class TestProjectCreation(unittest.TestCase):
         self.assertEqual(counts.get(self.parent_key), 2)
 
 
+class TestNewProjectScaffold(unittest.TestCase):
+    """作った作業場に README に加えてローカルの git リポジトリと空の NOW.md ができるかを検証する
+    （2026-11-03・ユーザー依頼 7c136ff2a3f5「今はREADMEだけ作られる」）。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="cwa_scaffold_")
+        self.group_dir = os.path.join(self.temp_dir, "developing")
+        self.original_db_file = pm.DB_FILE
+        pm.DB_FILE = os.path.join(self.temp_dir, "projects.db")
+        pm.init_db()
+
+    def tearDown(self):
+        pm.DB_FILE = self.original_db_file
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create(self, name="scaffold-demo"):
+        return pm.create_project(
+            self.group_dir,
+            "developing",
+            name,
+            source_chat="最初の指示",
+            parent_key="developing",
+        )
+
+    @unittest.skipUnless(
+        shutil.which("git"), "git が無い機械では本物の git init を試せない"
+    )
+    def test_READMEに加えてgitリポジトリと空のNOW_mdができる(self):
+        created = self._create()
+        path = created["abs_path"]
+        self.assertTrue(os.path.isfile(os.path.join(path, "README.md")))
+        self.assertTrue(os.path.isdir(os.path.join(path, ".git")))
+        now_path = os.path.join(path, "NOW.md")
+        self.assertTrue(os.path.isfile(now_path))
+        self.assertEqual(os.path.getsize(now_path), 0)
+        # 初回コミットは作らない（.gitignore と作者は作業場のセッションが決める）
+        self.assertFalse(
+            os.path.exists(os.path.join(path, ".git", "refs", "heads", "master"))
+            or os.path.exists(os.path.join(path, ".git", "refs", "heads", "main"))
+        )
+        self.assertNotIn("warning", created)
+
+    def test_既にあるNOW_mdとgitは上書きしない(self):
+        path = os.path.join(self.temp_dir, "existing")
+        git_dir = os.path.join(path, ".git")
+        os.makedirs(git_dir)
+        marker = os.path.join(git_dir, "keep.txt")
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("既存のリポジトリ")
+        now_path = os.path.join(path, "NOW.md")
+        with open(now_path, "w", encoding="utf-8") as f:
+            f.write("既存の引き継ぎ")
+
+        with mock.patch.object(pm.subprocess, "run") as run:
+            warnings = pm.scaffold_project_folder(path)
+
+        self.assertEqual(warnings, [])
+        run.assert_not_called()
+        with open(now_path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "既存の引き継ぎ")
+        self.assertTrue(os.path.isfile(marker))
+
+    def test_gitが無くても作成は止めず警告を返してログに出す(self):
+        out = io.StringIO()
+        with mock.patch.object(pm.shutil, "which", return_value=None), mock.patch(
+            "sys.stdout", out
+        ):
+            created = self._create("no-git")
+        path = created["abs_path"]
+        self.assertTrue(os.path.isfile(os.path.join(path, "README.md")))
+        self.assertTrue(os.path.isfile(os.path.join(path, "NOW.md")))
+        self.assertFalse(os.path.exists(os.path.join(path, ".git")))
+        self.assertIn("git が見つからない", created["warning"])
+        self.assertIn("git init", created["warning"])
+        self.assertIn("git が見つからない", out.getvalue())
+        # DB にも記録されている（作成そのものは済んでいる）
+        self.assertEqual(
+            [p["name"] for p in pm.list_sub_projects(query="最初の指示")], ["no-git"]
+        )
+
+    def test_git_initが失敗しても作成は止めず理由を警告に入れる(self):
+        failed = mock.Mock(returncode=128, stdout="", stderr="fatal: 試しの失敗")
+        with mock.patch.object(
+            pm.shutil, "which", return_value="git"
+        ), mock.patch.object(pm.subprocess, "run", return_value=failed):
+            created = self._create("git-fails")
+        self.assertIn("終了コード 128", created["warning"])
+        self.assertIn("fatal: 試しの失敗", created["warning"])
+        self.assertTrue(os.path.isfile(os.path.join(created["abs_path"], "NOW.md")))
+
+    def test_git_initはGIT_の環境変数を受け継がない(self):
+        ok = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.dict(
+            os.environ, {"GIT_DIR": "C:/elsewhere/.git", "PATH": "C:/bin"}
+        ), mock.patch.object(pm.shutil, "which", return_value="git"), mock.patch.object(
+            pm.subprocess, "run", return_value=ok
+        ) as run:
+            self._create("git-env")
+        env = run.call_args.kwargs["env"]
+        self.assertNotIn("GIT_DIR", env)
+        self.assertEqual(env["PATH"], "C:/bin")
+
+    def test_git_initが時間切れでも作成は止めない(self):
+        with mock.patch.object(
+            pm.shutil, "which", return_value="git"
+        ), mock.patch.object(
+            pm.subprocess,
+            "run",
+            side_effect=pm.subprocess.TimeoutExpired(["git", "init"], 30),
+        ):
+            created = self._create("git-timeout")
+        self.assertIn("git init", created["warning"])
+        self.assertTrue(os.path.isdir(created["abs_path"]))
+
+
 class TestProjectPathResolution(unittest.TestCase):
     """プロジェクトキーからのパス解決と、不正なキーの拒否を検証する。"""
 
@@ -721,7 +836,8 @@ class TestTrustRegistration(unittest.TestCase):
         self.original_config = sm.CLAUDE_CONFIG
         self.original_backup = sm.CLAUDE_CONFIG_BACKUP
         sm.CLAUDE_CONFIG = self.config_path
-        sm.CLAUDE_CONFIG_BACKUP = self.config_path + ".bak"
+        # 控えは書いた設定ファイルの隣（trial_roles の段2から config_path に付けて作る）
+        sm.CLAUDE_CONFIG_BACKUP = self.config_path + ".claude-web-app.bak"
 
         self.project_dir = os.path.join(self.temp_dir, "sample-project")
         os.makedirs(self.project_dir)
@@ -765,16 +881,19 @@ class TestSessionListing(unittest.TestCase):
     """稼働中セッションの判定と一覧を検証する。"""
 
     def setUp(self):
+        # 一覧は置き場（CLAUDE_HOME）の sessions を読む（trial_roles の段2から SESSIONS_DIR は見ない）
         self.temp_dir = tempfile.mkdtemp(prefix="cwa_sessions_")
-        self.original_dir = sm.SESSIONS_DIR
-        sm.SESSIONS_DIR = self.temp_dir
+        self.sessions_dir = os.path.join(self.temp_dir, "sessions")
+        os.makedirs(self.sessions_dir)
+        self.original_home = sm.CLAUDE_HOME
+        sm.CLAUDE_HOME = self.temp_dir
 
     def tearDown(self):
-        sm.SESSIONS_DIR = self.original_dir
+        sm.CLAUDE_HOME = self.original_home
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _write(self, name, data):
-        with open(os.path.join(self.temp_dir, name), "w", encoding="utf-8") as f:
+        with open(os.path.join(self.sessions_dir, name), "w", encoding="utf-8") as f:
             json.dump(data, f)
 
     def test_存在しないpidのセッションは生存扱いしない(self):
@@ -793,7 +912,7 @@ class TestSessionListing(unittest.TestCase):
 
     def test_壊れた記録があっても一覧は落ちない(self):
         with open(
-            os.path.join(self.temp_dir, "broken.json"), "w", encoding="utf-8"
+            os.path.join(self.sessions_dir, "broken.json"), "w", encoding="utf-8"
         ) as f:
             f.write("{ this is not json")
         self.assertEqual(sm.list_sessions(), [])

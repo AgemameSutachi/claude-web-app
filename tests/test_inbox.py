@@ -80,6 +80,11 @@ class InboxTestBase(unittest.TestCase):
         sm.TEXT_CONFIRM_TIMEOUT_SEC = 2.0
         sm.STATE_POLL_SEC = 0.02
         sm.INBOX_ENABLED = True
+        # ほかのアカウントの本物の受け箱（home の下）を見ない・掃除しない
+        self._definitions = sm.accounts.definitions
+        sm.accounts.definitions = lambda: [
+            {"name": "main", "main": True, "error": None, "home": None}
+        ]
 
         self.state = {"pid": 4242, "status": "idle", "sessionId": OLD_SID}
         sm._read_state = lambda pid: dict(self.state)
@@ -108,6 +113,7 @@ class InboxTestBase(unittest.TestCase):
             self.mod.join(2)
         for name, value in self._originals.items():
             setattr(sm, name, value)
+        sm.accounts.definitions = self._definitions
         self.tmp.cleanup()
 
     def write_alive(self, sid=OLD_SID, age_sec=0.0):
@@ -514,6 +520,90 @@ class SendViaInboxTest(InboxTestBase):
         self.assertEqual(leftovers, [])
 
 
+class OtherAccountInboxTest(InboxTestBase):
+    """ほかのアカウントの子は、mod が家（USERPROFILE）の下の受け箱に書く（011b・2026-10-29）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp.name, "other_home")
+        self.other_dir = os.path.join(self.home, ".claude-web-app", "inbox")
+        sm.accounts.definitions = lambda: [
+            {"name": "main", "main": True, "error": None, "home": None},
+            {
+                "name": "second",
+                "main": False,
+                "error": None,
+                "home": self.home,
+                "config_dir": os.path.join(self.home, "cfg"),
+            },
+            # 設定の壊れたアカウントの置き場は見ない
+            {"name": "broken", "main": False, "error": "x", "home": self.tmp.name},
+        ]
+
+    def write_other_alive(self, age_sec=0.0):
+        write_json(
+            sm._inbox_path(OLD_SID, "alive", self.other_dir),
+            {"sid": OLD_SID, "version": "1.0.0", "at": (time.time() - age_sec) * 1000},
+        )
+
+    def test_dirs(self):
+        self.assertEqual(sm._inbox_dirs(), [sm._inbox_dir(), self.other_dir])
+
+    def test_alive_in_other_home_is_seen(self):
+        self.write_other_alive()
+        self.assertEqual(sm.inbox_alive(OLD_SID)["version"], "1.0.0")
+        self.assertEqual(sm._inbox_alive_at(OLD_SID)[1], self.other_dir)
+        self.write_other_alive(age_sec=sm.INBOX_ALIVE_FRESH_SEC + 5)
+        self.assertIsNone(sm.inbox_alive(OLD_SID))
+
+    def test_newest_alive_wins(self):
+        self.write_alive(age_sec=5)
+        self.write_other_alive()
+        self.assertEqual(sm._inbox_alive_at(OLD_SID)[1], self.other_dir)
+
+    def test_text_goes_through_other_home(self):
+        self.write_other_alive()
+        directory = self.other_dir
+
+        class OtherMod(FakeMod):
+            def run(inner):
+                path = sm._inbox_path(inner.sid, "req", directory)
+                while not inner.stop.is_set():
+                    data = sm._read_json_file(path)
+                    if data and not data.get("cancelled"):
+                        inner.reqs.append(data)
+                        inner.behave(data)
+                        return
+                    time.sleep(0.02)
+
+        def behave(req):
+            for stage in ("queued", "submitted"):
+                write_json(
+                    sm._inbox_path(OLD_SID, "ack", directory),
+                    {"id": req["id"], "stage": stage, "newSessionId": OLD_SID},
+                )
+                if stage == "queued":
+                    self.submitted.add((OLD_SID, req["text"]))
+
+        self.mod = OtherMod(OLD_SID, behave)
+        self.mod.start()
+        result = sm.send_to_session(4242, text="ほかのアカウントへの本文")
+        self.assertEqual(result["via"], "inbox")
+        self.assertEqual(self.console, [])
+        self.assertEqual(self.mod.reqs[0]["text"], "ほかのアカウントへの本文")
+        # 本家の置き場には req を書かない
+        self.assertFalse(os.path.exists(sm._inbox_path(OLD_SID, "req")))
+        self.assertFalse(os.path.exists(sm._inbox_path(OLD_SID, "req", directory)))
+
+    def test_cleanup_covers_other_home(self):
+        self.write_other_alive()
+        path = sm._inbox_path(OLD_SID, "alive", self.other_dir)
+        past = time.time() - sm.INBOX_STALE_SEC - 10
+        os.utime(path, (past, past))
+        self.assertEqual(sm.cleanup_inbox(), 1)
+        self.assertFalse(os.path.exists(path))
+
+
 class CleanupInboxTest(InboxTestBase):
     def test_removes_only_old_files(self):
         self.write_alive(OLD_SID)
@@ -533,6 +623,11 @@ class CleanupInboxTest(InboxTestBase):
 
     def test_missing_dir_is_fine(self):
         self.assertEqual(sm.cleanup_inbox(), 0)
+
+    def test_only_temp_dirs_are_seen(self):
+        # 陽性対照: 基底はアカウントを本家だけにしているので、置き場は一時フォルダだけ
+        self.assertEqual(sm._inbox_dirs(), [sm._inbox_dir()])
+        self.assertTrue(sm._inbox_dir().startswith(self.tmp.name))
 
 
 if __name__ == "__main__":

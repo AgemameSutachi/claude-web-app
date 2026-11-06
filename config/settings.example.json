@@ -16,5 +16,14 @@
     "ollama_timeout": 60,
     "claude_exe": "",
     "auto_clear_mode": "dry_run",
-    "inbox_enabled": true
+    "inbox_enabled": true,
+    "accounts": [],
+    "trial_roles_mirror": "",
+    "mirror_account": "",
+    "five_hour_max_pct": 80,
+    "unassigned_account": "",
+    "machine_send": {"senders": {}, "sources": []},
+    "quota_resume_mode": "on",
+    "quota_alert_mode": "on",
+    "liaison": {"tool": "", "from": "claude-web-app", "to": "管理役", "permission_wait_minutes": 10}
 }

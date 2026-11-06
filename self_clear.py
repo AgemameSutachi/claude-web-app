@@ -52,7 +52,7 @@ POLL_SEC = 1.0
 
 # 引き継ぎファイルのパスの長さの上限（文字）。本文が貼り付け扱いになる長さ
 # （sm.PASTE_THRESHOLD_CHARS）を超えないように抑える
-HANDOFF_PATH_MAX_LEN = 700
+HANDOFF_PATH_MAX_LEN = 680
 
 # ドライブ文字で始まる Windows の絶対パスだけを受ける（UNC で外の共有へつなぎに行かない）
 HANDOFF_PATH_PATTERN = re.compile(r"[A-Za-z]:[\\/]")
@@ -64,10 +64,14 @@ RESUME_TEXT = (
 )
 
 # 自動の区切り（auto_clear）の依頼に応えた予約のときに送る本文。
-# 自動の区切りは作業の切れ目とは限らないので、続きを始めさせずに待たせる（利用者の決定・2026-10-12）
+# 引き継ぎにやりかけの作業があれば続けさせ、無ければ待たせる。以前は一律に待たせていたため、
+# 枠切れで区切った子がやりかけを持ったまま止まり、枠が戻っても誰も続きを頼まなかった
+# （2026-10-31 example-blog・管理役の依頼 a855c47ab3d7）。頭は変えないこと（AUTOMATED_PREFIXES は
+# 「…済みました。」まで、auto_clear.RESUME_HEADS は「…引き継ぎファイル「」までで照合する。RESUME_TEXT も同じ）
 AUTO_RESUME_TEXT = (
-    "自動の区切りの /clear が済みました。引き継ぎファイル「{path}」を読んで、"
-    "次の依頼を待ってください。返事は不要です。"
+    "自動の区切りの /clear が済みました。引き継ぎファイル「{path}」を読み、"
+    "やりかけの作業（人に止められたもの・返事待ちは除く）があれば続きから進めてください。"
+    "無ければ次の依頼を待ってください。"
 )
 
 # 人の最後の発言から、これだけたつまでは区切らない（秒）。auto_clear の当たりにも使う
@@ -111,7 +115,7 @@ TOOL_CALL_RE = re.compile(
 )
 
 # --handoff を省いたときに、会話の cwd の直下から探す引き継ぎファイル（前から順に）。
-# NOW.md が本番の役とそろえた置き場（2026-10-17 利用者の依頼）。
+# NOW.md が管理側の役とそろえた置き場（2026-10-17 利用者の依頼）。
 # README.md は移行中の子が区切りを断られないための後ろ盾
 DEFAULT_HANDOFF_NAMES = (("NOW.md", "now"), ("README.md", "readme"))
 COMMAND_TOOLS = ("Bash", "PowerShell")
@@ -564,10 +568,24 @@ def validate_handoff(path):
     return path
 
 
+def _has_text(path):
+    """ファイルに空白以外の文字があるか。読めないときは「ある」とみなす（従来どおり選ぶ）。"""
+    try:
+        with open(path, "rb") as f:
+            # 先頭だけで足りる（空かどうかを見るだけ。大きな引き継ぎを全部読まない）
+            head = f.read(4096)
+    except OSError:
+        return True
+    # UTF-8 の BOM だけのファイルも空とみなす
+    return bool(head.lstrip(b"\xef\xbb\xbf").strip())
+
+
 def default_handoff(cwd):
     """--handoff を省いたときの引き継ぎファイルを、会話の cwd の直下から選ぶ。
 
     NOW.md があればそれ、無く README.md があればそれ（移行中の後ろ盾）。
+    中身が空（空白だけ）のファイルは無いものとして次へ回る（作成の口は空の NOW.md を
+    置くので、子が書く前に区切っても README.md の「最初の指示」を読めるように・2026-11-03）。
 
     Returns:
         tuple: (絶対パス, 出どころ "now" / "readme")
@@ -583,11 +601,11 @@ def default_handoff(cwd):
     folder = os.path.normpath(cwd.strip())
     for file_name, source in DEFAULT_HANDOFF_NAMES:
         path = os.path.join(folder, file_name)
-        if os.path.isfile(path):
+        if os.path.isfile(path) and _has_text(path):
             return path, source
     names = "・".join(name for name, _ in DEFAULT_HANDOFF_NAMES)
     raise SelfClearError(
-        f"既定の引き継ぎファイル（{names}）が {folder} の直下にありません。"
+        f"既定の引き継ぎファイル（{names}）が {folder} の直下に無いか、中身が空です。"
         "NOW.md に引き継ぎを書いてから打ち直すか、--handoff で引き継ぎファイルを指定してください"
     )
 
@@ -684,7 +702,7 @@ def request_self_clear(caller, handoff, wait_sec=None, start_worker=True):
     Args:
         caller: 接続の持ち主のプロセスの pid（caller_pid で引いたもの。None なら断る）
         handoff: 引き継ぎファイルの絶対パス。None なら会話の cwd 直下の NOW.md
-            （無ければ README.md）を使い、どちらを使ったかを handoff_source に残す
+            （無いか空なら README.md）を使い、どちらを使ったかを handoff_source に残す
         wait_sec: 入力待ちになるのを待つ上限（秒）。None なら DEFAULT_WAIT_SEC
         start_worker: False なら見張りを起こさない（試験用）
 
@@ -868,7 +886,8 @@ def _wait_ready(reservation, session_id, sleep, clock, delivered_text=None):
                 "superseded",
                 "予約の後に新しい仕事（人・ほかのセッション・通知）が来たので送らなかった",
             )
-        if state.get("status") == "idle":
+        if sm.is_input_ready(state):
+            # 裏の仕事を持った入力待ち（shell）も含む。裏の仕事は /clear の後も続く
             if idle_since is None:
                 idle_since = clock()
             elif clock() - idle_since >= IDLE_STABLE_SEC and clock() >= reservation.get(

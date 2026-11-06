@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import threading
 import unicodedata
 import urllib.error
@@ -45,6 +46,12 @@ MAX_CHAT_CHARS = 3000
 # 記録の created_at は秒で切り捨て・アプリ作成ならフォルダ作成の直後に取るため、
 # 実測のずれは1秒未満（2026-10-23: temp-session → temp-session-develop で 0.63 秒）。
 RENAME_MATCH_TOLERANCE_SEC = 3.0
+
+# 作った作業場で打つ git init の待ち時間の上限（秒）。手元のフォルダなら1秒かからない
+GIT_INIT_TIMEOUT_SEC = 30
+
+# 作った作業場に置く空の引き継ぎファイル（全体の決まりで、いまの進み具合はここに書く）
+HANDOFF_FILE_NAME = "NOW.md"
 
 # Windows で使用できない予約デバイス名（フォルダ名として使うとエラーになる）
 WINDOWS_RESERVED_NAMES = {"con", "prn", "aux", "nul"}
@@ -346,6 +353,9 @@ def create_project(dest_dir, key_prefix, name, source_chat="", parent_key=None):
         # README の書き込み失敗はプロジェクト作成そのものを妨げない
         print(f"[ProjectManager] README.md の作成に失敗しました: {e}")
 
+    # 引き継ぎの NOW.md とローカルの git リポジトリ。作れなくても作成は止めず、警告として返す
+    warnings = scaffold_project_folder(abs_path)
+
     with _db_lock:
         conn = _connect()
         try:
@@ -371,7 +381,7 @@ def create_project(dest_dir, key_prefix, name, source_chat="", parent_key=None):
         finally:
             conn.close()
 
-    return {
+    created = {
         "name": name,
         "project_key": project_key,
         "parent_key": parent_key,
@@ -380,6 +390,89 @@ def create_project(dest_dir, key_prefix, name, source_chat="", parent_key=None):
         "created_at": now,
         "updated_at": now,
     }
+    if warnings:
+        # 画面のトーストにそのまま出す（呼び出し側は "warning" を表示する）
+        created["warning"] = "\n".join(warnings)
+    return created
+
+
+def scaffold_project_folder(abs_path):
+    """作った作業場へ、空の NOW.md とローカルの git リポジトリを用意する。
+
+    どちらも既にあれば触らない（上書きしない）。初回コミットは作らない
+    （.gitignore と作者の決め方は作業場のセッションに任せる。作者が未設定の機械で
+    コミットに失敗して作成ごと止まるのも避ける）。
+
+    Args:
+        abs_path: 作業場フォルダの絶対パス
+
+    Returns:
+        利用者に見せる警告文のリスト（すべて用意できれば空）。警告はログにも出す。
+    """
+    warnings = []
+    for warning in (_create_empty_handoff(abs_path), _init_git_repo(abs_path)):
+        if warning:
+            print(f"[ProjectManager] 警告: {warning}（{abs_path}）", flush=True)
+            warnings.append(warning)
+    return warnings
+
+
+def _create_empty_handoff(abs_path):
+    """空の NOW.md を作る。既にあれば何もしない。戻り値は警告文（無事なら None）。"""
+    path = os.path.join(abs_path, HANDOFF_FILE_NAME)
+    try:
+        # "x" は排他作成。既にあるファイルを空で上書きしない
+        with open(path, "x", encoding="utf-8"):
+            pass
+    except FileExistsError:
+        return None
+    except OSError as e:
+        return (
+            f"{HANDOFF_FILE_NAME} を作れませんでした（あとで手で作ってください）: {e}"
+        )
+    return None
+
+
+def _init_git_repo(abs_path):
+    """作業場で git init を打つ。既に .git があれば何もしない。戻り値は警告文（無事なら None）。"""
+    if os.path.exists(os.path.join(abs_path, ".git")):
+        return None
+    git = shutil.which("git")
+    if not git:
+        return (
+            "git が見つからないため、ローカルの git リポジトリを作れませんでした"
+            "（git を入れてから、このフォルダで git init を打ってください）"
+        )
+    try:
+        result = subprocess.run(
+            [git, "init", "-q"],
+            cwd=abs_path,
+            # サーバーが GIT_DIR 等を受け継いで動いていても、作業場そのものに作る
+            env={
+                k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")
+            },
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GIT_INIT_TIMEOUT_SEC,
+            # サーバーから打つので、コンソールの窓を出さない
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            f"git init が {GIT_INIT_TIMEOUT_SEC} 秒で終わらなかったため、"
+            "ローカルの git リポジトリを作れなかった可能性があります（このフォルダで git status を確かめてください）"
+        )
+    except OSError as e:
+        return f"git init を起動できませんでした（このフォルダで手で git init を打ってください）: {e}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[:300]
+        return (
+            f"git init に失敗しました（終了コード {result.returncode}・このフォルダで手で git init を打ってください）"
+            + (f": {detail}" if detail else "")
+        )
+    return None
 
 
 def create_sub_project(parent_key, parent_dir, name, source_chat=""):

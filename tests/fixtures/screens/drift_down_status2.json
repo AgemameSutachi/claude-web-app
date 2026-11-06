@@ -1,0 +1,41 @@
+{
+ "note": "本物の子（S0・30行のバッファ・2行の状態行・帯つき）。欄ごと1行下へずれ、カーソルは上の罫線の行・下の罫線は状態行に上書き。記号の行が空でカーソルが記号の2桁右なので空",
+ "captured": "2026-10-28（session_input_sender.Console の読み取りだけ。本文の行は一般化した）",
+ "cursor": [
+  26,
+  2
+ ],
+ "expected_state": "empty",
+ "lines": [
+  "",
+  "●記録から、送信の失敗はすべて no_input_area でした。",
+  "  画面の末尾に作業中の表示が残っています。",
+  "",
+  "  Searched for 1 pattern, read 1 file",
+  "",
+  "●失敗の画面の末尾に、idle なのに作業中の表示が残っています。読んでいる窓がカーソルに付いていかず、古い所を参",
+  "照",
+  "●している疑いがあります。読むだけの診断で確かめます。 ルに付いていかず、古い所を参",
+  "",
+  "●Made 2 scratchpad edits +57, ran 2 shell commands",
+  "",
+  "●失敗はセッション0の起動に集中しています。",
+  "  数本を読むだけで診断します。",
+  "",
+  "  Read 1 file, ran 1 shell command",
+  "",
+  "●画面で missing が再現しました。行番号つきで画面全体を見ます。",
+  "●Read 1 file, ran 1 shell commanead      file, runni g 1 shell command…",
+  "  Mak$ C:/Users/user1/venv/Scripts/python.exe C:/Users/user1/scratchpad/dump_console.py 1234",
+  "  ⎿  e2-develop-developing-clacde-web-app/scratchpad/dump_console.py 12344",
+  "     scratchpad\\dump_console.py",
+  "✶ Imagining… 1m 28s · ↓ 7.9k tokens)",
+  "✻ Ionizing…  許可待ちの記録（判定・ブロックはしない）… 0/3 · 1m 26s ·  7.8k tokens)",
+  "メモなし                                                                       u      id   メモを編集  ファイル一覧 [-]",
+  "",
+  "─────────────────────────────────────────────────────────────────────────────────────────────────────── claude-web-app ─",
+  ">",
+  "  文脈 14% ・ 5時間枠 4% ・ 週次枠 16%（使用率）",
+  "  ⏵⏵ don't ask on (shift+tab to cycle)"
+ ]
+}

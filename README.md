@@ -94,6 +94,10 @@ python -m venv .venv
 4. **ルーターのポート開放はしないでください。** 公開のインターネットに出す作りではありません。
 5. 合言葉が漏れたと思ったら、`auth_token` を変えて起動し直してください（覚えた印もすべて無効になります）。
 6. `bypassPermissions` で建てたセッションは、確認なしでコマンドを実行します。選ぶのは信頼できる作業だけにしてください。
+7. **`machine_send` は、合言葉を知る機械に、この PC の全セッションへ指示を打ち込ませる口です**（このアプリが起こしていないもの・ほかのアカウントのものも含みます）。使わないなら `senders` を空のままにしてください（口は閉じます）。
+   使うときは、送り手ごとに `auth_token` とは別の合言葉（16文字以上）を作り、`sources` には送り手の機械を1台ずつ `/32` で書きます。
+   `sources` の機械は `allowed_networks` の外でもこの口だけは通り、逆にその機械からは画面とほかの API が使えなくなります（広い範囲を書くと自分のスマホも締め出されます）。ファイアウォールでもその IP を開けてください。
+8. **`liaison` の `tool` は空のままにしてください。** 指したファイルを Python のモジュールとして**このアプリのプロセスの中に読み込んで**呼び出す、作者の環境専用の連携です（公開の版には対応する道具が入っていません）。信頼できないファイルを指すと、そのコードがこのアプリの権限で動きます。
 
 ## 設定（`config/settings.json`）
 
@@ -118,6 +122,31 @@ python -m venv .venv
 | `relogin_enabled` | `true` | ログイン更新の画面（`/relogin`）を使うか |
 | `inbox_enabled` | `true` | 相手に mod `web-app-inbox` が入っていれば受け箱で送るか |
 | `paste_preamble` | （書かない） | 長い本文（貼り付け扱いになる801字以上）の前に打つ前置きの既定。空文字で付けない。書かなければ組み込みの文 |
+| `accounts` | `[]` | 同じ機械で claude を複数のアカウントで動かすときの定義（下の「アカウントと使用枠」）。空なら `~/.claude` の1件だけ |
+| `unassigned_account` | `""` | アカウントを割り当てていないプロジェクトを起こすアカウントの名前。空なら既定のアカウント（`"main": true` のもの） |
+| `five_hour_max_pct` | `80` | 新しいセッションの既定のアカウントを選ぶとき、5時間枠の使用%がこれ以上のアカウントを外す。`100` にすると、使い切ったときだけ外す（アカウントの定義に書けばそちらが優先） |
+| `trial_roles_mirror`・`mirror_account` | `""` | claude-session-resumer（別リポジトリ）と連携するとき用。プロジェクトとアカウントの割り当てを、resumer が読む形式（`trial_roles.json`）で書き出す先のパスと、書き出すアカウントの名前。resumer を使わないなら空のまま |
+| `machine_send`（`sources` だけ★） | `{"senders": {}, "sources": []}` | 機械からセッションへ伝言を入れる口（`POST /api/machine-send`）。本文の頭に本アプリが「【機械からの伝言・id=…・from=…・ユーザーの発言ではありません】」を付ける。`senders` は `{送り手の名前: 合言葉（16文字以上）}`、`sources` は送り手の機械（CIDR・1台ずつ /32）。送り手が空なら口は閉じる。**上の「安全のための注意」の7を読む** |
+| `quota_resume_mode` | `on` | 利用の枠（5時間枠・週の枠）を使い切って止まったセッションへの続きの依頼: `off`／`dry_run`／`on`。`on` では、枠が戻って数分のうちに本アプリが「枠切れで中断した作業だけを続けて」という文を打ち込みます（戻ってから6時間を過ぎたものは除く）。自動で打たせたくなければ `off` |
+| `quota_alert_mode` | `on` | 週の枠で止まったセッションを ntfy で人へ知らせる: `off`／`on`（送り先の `config/ntfy.ini` が無ければ鳴らさない） |
+| `liaison` | 使わない（`tool` が空） | 作者の環境専用の連携（**上の「安全のための注意」の8**）。`tool` は空のままにしてください。画面に出る「管理役」は、この連携の宛先（`to`）のことです |
+
+### アカウントと使用枠（任意）
+
+- `accounts` の各要素は `name`（と画面に出す `label`）。既定のアカウントには `"main": true` を付け、置き場を書きません（`~/.claude` を使う）。
+  ほかのアカウントには `config_dir`（`CLAUDE_CONFIG_DIR` に渡すフォルダ）と `home`（そのアカウントで起こすときの `HOME`・`USERPROFILE`）を書きます。どちらも実在するフォルダにしてください。
+  ```json
+  "accounts": [
+    {"name": "a", "label": "仕事用", "main": true},
+    {"name": "b", "label": "個人用", "config_dir": "C:\\claude-b\\cfg", "home": "C:\\claude-b\\home"}
+  ]
+  ```
+- 使用%（5時間枠・週の枠）を一覧の上に出すには、取り元として `limits_url`（作者の使用量モニター claude-usage-monitor の `/api/limits` の形の JSON を返す URL）か、`statusline_dir`（statusline のスクリプトが書く `rate_limits` の写しの置き場）を書きます。どちらも作者の道具の形が前提です。
+  枠の大きさの比は `capacity`（週）・`five_hour_capacity`（5時間）、5時間枠の無い契約は `five_hour_unlimited: true`。
+- プロジェクトごとの割り当ては `~/.claude-web-app/account_assignments.json` に残り、画面の「アカウントを移す」で替えられます（会話を持ち越す移しもできます）。割り当て先が使えないときは、黙って既定のアカウントで起こさずに断ります。
+- `trial_roles_mirror` に書き出し先があり `account_assignments.json` がまだ無いときは、最初に一度その写しから割り当てを取り込みます。取り込めない間は、既定のアカウント以外への割り当てを断ります（理由は `GET /api/accounts` の `pending_import`）。
+- 枠を使い切ったセッションは一覧に ⛔ で出ます。枠が戻ったら続きを頼み（`quota_resume_mode`・5時間枠も週の枠も）、週の枠は止まった時点で ntfy でも知らせます（`quota_alert_mode`・戻りが最長7日先のため）。
+- `config/ntfy.ini`（git では追跡しません）の形: `[DEFAULT]` に `NTFY_SERVER`・`NTFY_TOPIC`（必須）、任意で `NTFY_TOKEN`・`NTFY_FALLBACK_SERVER`・`NTFY_FALLBACK_TOKEN`・`NTFY_TIMEOUT_SEC`。送るたびに読みます。
 
 ## 仕組みの要点
 
@@ -141,8 +170,11 @@ python -m venv .venv
 ## 試験
 
 ```powershell
-.venv\Scripts\python.exe -m unittest discover -s tests -v
+.venv\Scripts\python.exe -m pip install pytest
+.venv\Scripts\python.exe -m pytest tests test_trial_roles.py
 ```
+
+`tests/conftest.py` が、試験中に手元の `trial_roles.json`（claude-session-resumer 連携用の写し）を読まないように差し替えるので、pytest で走らせてください（unittest では差し替えが効きません）。
 
 mod の試験（`tests/test_inbox_mod.py`）は Node.js が要ります（無ければ飛ばします）。
 

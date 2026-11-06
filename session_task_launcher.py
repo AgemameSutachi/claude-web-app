@@ -11,7 +11,9 @@
 
     使い方: pythonw.exe session_task_launcher.py <要求ファイル.json>
 
-要求ファイル: ``{"argv": [...], "cwd": "...", "response": "<応答ファイル>"}``
+要求ファイル: ``{"argv": [...], "cwd": "...", "response": "<応答ファイル>", "env_overrides": {...}}``
+（env_overrides は任意。claude のアカウントの置き場 CLAUDE_CONFIG_DIR・HOME・USERPROFILE だけを足す。
+タスク・制限トークンの道は本アプリの env を渡せないため、別のアカウントで起こすときはここで載せる）
 応答ファイル: ``{"pid": 1234, "win_session": 1}`` または ``{"error": "..."}``
 
 このプロセスは起動報告を書いた直後に終了するため、起動した claude の
@@ -35,9 +37,18 @@ def current_win_session():
     return sid.value
 
 
-def sanitized_env():
-    """Claude Code 由来のマーカーを除いた環境変数（session_manager.sanitize_env と同じ規則）。"""
-    return {k: v for k, v in os.environ.items() if not k.upper().startswith("CLAUDE")}
+# 要求で足してよい env のキー（accounts.ENV_KEYS と同じ。それ以外は黙って捨てる）
+OVERRIDE_KEYS = ("CLAUDE_CONFIG_DIR", "HOME", "USERPROFILE")
+
+
+def sanitized_env(overrides=None):
+    """Claude Code 由来のマーカーを除いた環境変数（session_manager.sanitize_env と同じ規則）に、
+    アカウントの置き場（overrides のうち OVERRIDE_KEYS の文字列だけ）を足したもの。"""
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("CLAUDE")}
+    for key, value in (overrides or {}).items():
+        if key in OVERRIDE_KEYS and isinstance(value, str) and value:
+            env[key] = value
+    return env
 
 
 def write_response(path, payload):
@@ -63,7 +74,7 @@ def main():
         proc = subprocess.Popen(
             request["argv"],
             cwd=request["cwd"],
-            env=sanitized_env(),
+            env=sanitized_env(request.get("env_overrides")),
             creationflags=CREATION_FLAGS,
             startupinfo=si,
             close_fds=True,

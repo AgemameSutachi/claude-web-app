@@ -148,8 +148,9 @@
             word-break: break-all;
         }
 
-        .session-actions { display: flex; gap: 6px; margin-top: 10px; }
-        .session-actions .util-btn { flex: 1; padding: 8px 0; }
+        /* ボタンが5つあるので、狭い幅では2段に折り返す（360px で1つ 57px まで縮むと文字が折れるため） */
+        .session-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+        .session-actions .util-btn { flex: 1 1 28%; padding: 8px 0; }
 
         .badge {
             font-size: 0.65rem;
@@ -172,6 +173,9 @@
         .badge.kept { background-color: rgba(34, 197, 94, 0.16); color: #86efac; }
         .badge.reserved { background-color: rgba(59, 130, 246, 0.16); color: #93c5fd; }
         .badge.waiting { background-color: rgba(239, 68, 68, 0.2); color: #f87171; }
+        /* どのアカウントで動いているか（割り当てと違うときは警告の色） */
+        .badge.acct { background-color: rgba(20, 184, 166, 0.16); color: #5eead4; }
+        .badge.acct-warn { background-color: rgba(245, 158, 11, 0.2); color: #fbbf24; }
 
         /* 人の手を待っているセッション（許可待ち・答え待ち）。押すと claude.ai の画面へ */
         .session-card.needs-attention { border: 2px solid #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15); }
@@ -188,6 +192,7 @@
         /* 今週の使用量と会話の長さ。目安を超えたら色を変える */
         .usage-line { font-size: 0.72rem; color: var(--muted-color); margin-top: 2px; }
         .usage-line .warn { color: #fbbf24; font-weight: 600; }
+        .session-meta.warn { color: #fbbf24; }
         .usage-line .hot { color: #f87171; font-weight: 600; }
         .usage-summary { font-size: 0.68rem; color: var(--muted-color); margin: -4px 2px 8px; line-height: 1.6; }
 
@@ -554,6 +559,10 @@
             <div id="start-screen" class="screen-dump" style="display: none;"></div>
 
             <div class="pj-hint" style="margin-top: 0;">対象: <span id="start-target-label">-</span></div>
+            <div class="pj-hint" id="start-account-row" style="display: none; margin-top: 0;">
+                アカウント: <b id="start-account-label">-</b>
+                <button class="util-btn" style="margin-left: 6px;" onclick="openMoveAccount()">アカウントを移す…</button>
+            </div>
 
             <label class="pj-label" for="start-resume">会話</label>
             <select id="start-resume" class="pj-select" style="width: 100%; margin-bottom: 10px;">
@@ -608,9 +617,44 @@
                 作成後、そのプロジェクトでセッションを開始し、上の内容が最初の指示として送信されます。
             </div>
 
+            <div id="create-account-box" style="display: none;">
+                <label class="pj-label" for="create-account">アカウント</label>
+                <select id="create-account" class="pj-select" style="width: 100%;"></select>
+                <div class="pj-hint" id="create-account-hint"></div>
+            </div>
+
             <div id="create-launch-options"></div>
 
             <button class="pj-primary-btn" id="create-submit" onclick="submitCreateProject()">作成して開始</button>
+        </div>
+    </div>
+
+    <!-- 作業場のアカウントを移すモーダル -->
+    <div id="move-account-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>アカウントを移す</h3>
+                <button class="close-modal-btn" onclick="hideMoveAccount()">&times;</button>
+            </div>
+
+            <div id="move-account-error" class="pj-error" style="display: none;"></div>
+            <div class="pj-hint" style="margin-top: 0;">対象: <b id="move-account-target">-</b>（いま: <span id="move-account-current">-</span>）</div>
+
+            <label class="pj-label" for="move-account-to">移す先</label>
+            <select id="move-account-to" class="pj-select" style="width: 100%; margin-bottom: 8px;"></select>
+
+            <label class="pj-label" for="move-account-prompt">起こし直しの最初の一言（省略可）</label>
+            <textarea id="move-account-prompt" class="pj-input"
+                      style="width: 100%; height: 80px; resize: vertical; margin-bottom: 6px; line-height: 1.5;"
+                      placeholder="省略すると「NOW.md（無ければ README.md）を読んで続きから」を送ります"></textarea>
+            <label class="check-row"><input type="checkbox" id="move-account-force"> 作業中でも止めて移す</label>
+
+            <div class="pj-hint">
+                割り当てを書き換え、この作業場で動いているセッションを<b>止めて</b>、移す先のアカウントで新しく起こします。
+                <b>前の会話は持ち越せません</b>（引き継ぎは NOW.md などのファイルで渡します）。以後はこのアカウントで起こします。
+            </div>
+
+            <button class="pj-primary-btn" id="move-account-submit" onclick="submitMoveAccount()">移して起こし直す</button>
         </div>
     </div>
 
@@ -645,6 +689,20 @@
             <button class="pj-primary-btn" id="send-submit" onclick="submitSend(false)">送る</button>
             <button class="pj-secondary-btn" id="send-discard" style="display: none; margin-top: 8px;"
                     onclick="submitSend(true)">入力欄の文字を消して送る</button>
+        </div>
+    </div>
+
+    <!-- 会話の末尾を読むモーダル（会話記録を読むだけ・Claude は呼ばない） -->
+    <div id="tail-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>会話の末尾</h3>
+                <button class="close-modal-btn" onclick="hideTailModal()">&times;</button>
+            </div>
+            <div class="pj-hint" style="margin-top: 0;"><b id="tail-target-label">-</b> の直近 20 件（人の発言と応答の文。道具は名前だけ）</div>
+            <div id="tail-error" class="pj-error" style="display: none;"></div>
+            <div id="tail-body" style="max-height: 55vh; overflow-y: auto; overflow-wrap: anywhere;"></div>
+            <button class="pj-secondary-btn" style="margin-top: 8px;" onclick="loadTail()">読み直す</button>
         </div>
     </div>
 
@@ -778,11 +836,35 @@
 
         let usageSummary = null;
         let autoClearMode = null;
+        // 枠が戻った子へ本アプリが続きを頼むか（on のときだけ「自動で頼みます」と出す）
+        let quotaResumeMode = null;
+        // 本アプリが頼まない・頼めなかった枠切れを管理役へ知らせているか（そのときは人へ手を頼まない）
+        let liaisonEnabled = false;
+
+        // 設定にあるアカウント（2つ以上のときだけ、一覧の行にどちらで動いているかを出す）
+        let accountList = [];
+
+        function accountLabel(name) {
+            const a = accountList.find(x => x.name === name);
+            return a ? a.label : (name || "");
+        }
+
+        function accountBadge(s) {
+            if (accountList.length < 2 || !s.account) return "";
+            if (s.account_expected) {
+                return `<span class="badge acct-warn" title="この作業場の割り当ては ${escapeHtml(accountLabel(s.account_expected))} です">` +
+                       `${escapeHtml(accountLabel(s.account))}（割り当ては ${escapeHtml(accountLabel(s.account_expected))}）</span> `;
+            }
+            return `<span class="badge acct" title="このアカウントで動いています">${escapeHtml(accountLabel(s.account))}</span> `;
+        }
 
         socket.on("sessions_list", (msg) => {
             sessions = msg.sessions || [];
             usageSummary = msg.usage_summary || null;
             autoClearMode = msg.auto_clear_mode || null;
+            quotaResumeMode = msg.quota_resume_mode || null;
+            liaisonEnabled = msg.liaison_enabled === true;
+            accountList = msg.accounts || [];
             const errorBox = document.getElementById("sessions-error");
             if (msg.error) {
                 errorBox.style.display = "block";
@@ -839,8 +921,11 @@
             const box = document.getElementById("usage-summary");
             if (!usageSummary) {
                 // 使用量の集計前でも、自動の区切りの状態は出す
-                if (autoClearMode && AUTO_CLEAR_MODE_LABELS[autoClearMode]) {
-                    box.innerText = `自動の区切り: ${AUTO_CLEAR_MODE_LABELS[autoClearMode]}（「残す」を押した行は区切りません）。`;
+                const limits = accountLimitsText();
+                if (limits || (autoClearMode && AUTO_CLEAR_MODE_LABELS[autoClearMode])) {
+                    box.innerText = [limits, autoClearMode && AUTO_CLEAR_MODE_LABELS[autoClearMode]
+                        ? `自動の区切り: ${AUTO_CLEAR_MODE_LABELS[autoClearMode]}（「残す」を押した行は区切りません）。` : ""]
+                        .filter(Boolean).join("\n");
                     box.style.display = "block";
                 } else {
                     box.style.display = "none";
@@ -848,8 +933,13 @@
                 return;
             }
             const start = formatDateTime(usageSummary.week_start);
-            let text = `今週（${start} から）の合計 ${formatCost(usageSummary.total_cost)}（推定・API 換算）。` +
-                `各行の %はこの合計に占める割合、会話の長さはいまの会話が読んでいるトークン数です。` +
+            const perAccount = usageSummary.per_account || {};
+            const accountPart = accountList.length >= 2 && Object.keys(perAccount).length
+                ? `内訳: ${accountList.map(a => `${a.label} ${formatCost(perAccount[a.name] || 0)}`).join("・")}。`
+                : "";
+            const limits = accountLimitsText();
+            let text = (limits ? limits + "\n" : "") + `今週（${start} から）の合計 ${formatCost(usageSummary.total_cost)}（推定・API 換算）。${accountPart}` +
+                `セッションの各行の % はこの合計に占める割合、会話の長さはいまの会話が読んでいるトークン数です。` +
                 `${usageSummary.warn_share_percent}% 超と ${formatTokens(usageSummary.warn_context_tokens)} 超には ▲ が付きます。`;
             if (usageSummary.unknown_models && usageSummary.unknown_models.length) {
                 text += ` 単価の分からないモデルは $0 として数えています: ${usageSummary.unknown_models.join(", ")}`;
@@ -920,9 +1010,15 @@
                     ${attentionBar(s)}
                     <div class="session-head">
                         <div class="session-name">${escapeHtml(s.name || shortProjectName(s.cwd))}</div>
-                        <span>${s.kept ? '<span class="badge kept" title="自動の区切り・起こし直しの対象から外しています">残す</span> ' : ""}${s.clear_reserved ? '<span class="badge reserved">区切り予約済み</span> ' : (s.auto_waiting ? '<span class="badge reserved">自動の区切りを依頼中</span> ' : "")}${s.elevated ? '<span class="badge admin" title="管理者として昇格して動いています">管理者</span> ' : ""}${winSessionBadge(s.win_session)}<span class="badge ${statusKey}">${escapeHtml(statusLabel)}</span></span>
+                        <span>${s.kept ? '<span class="badge kept" title="自動の区切り・起こし直しの対象から外しています">残す</span> ' : ""}${s.clear_reserved ? '<span class="badge reserved">区切り予約済み</span> ' : (s.auto_waiting ? '<span class="badge reserved">自動の区切りを依頼中</span> ' : "")}${s.elevated ? '<span class="badge admin" title="管理者として昇格して動いています">管理者</span> ' : (s.elevated === null ? '<span class="badge other" title="権限を読めませんでした。管理者で動いていて、このアプリ（通常の権限）からは確かめられないことが多いです（ほかに終わりかけのプロセス等）。バッジ無しは通常の権限です">権限 不明</span> ' : "")}${accountBadge(s)}${winSessionBadge(s.win_session)}<span class="badge ${statusKey}">${escapeHtml(statusLabel)}</span></span>
                     </div>
                     <div class="session-meta">${place}</div>
+                    ${accountList.length >= 2 && s.account_expected
+                        ? `<div class="session-meta warn">⚠ 割り当て（${escapeHtml(accountLabel(s.account_expected))}）と違うアカウントで動いています。終了して開始し直すと ${escapeHtml(accountLabel(s.account_expected))} で起きます。</div>`
+                        : ""}
+                    ${s.quota_stop
+                        ? `<div class="session-meta warn">${escapeHtml(quotaStopText(s))}</div>`
+                        : ""}
                     <div class="session-meta">開始 ${formatElapsed(s.started_at)} ・ 更新 ${formatElapsed(s.updated_at)} ・ PID ${escapeHtml(s.pid)}</div>
                     ${usageLine(s.usage)}
                     <div class="session-actions">
@@ -930,6 +1026,7 @@
                             ? `<a class="util-btn primary" style="text-align:center; text-decoration:none; line-height:1.6;" href="${escapeHtml(s.url)}" target="_blank" rel="noopener">claude.ai で開く</a>`
                             : `<button class="util-btn" disabled title="claude.ai への登録待ちです">リンク準備中</button>`}
                         <button class="util-btn" onclick="openSendModal('${jsQuote(s.pid)}')" title="/clear と本文を送る">送る</button>
+                        <button class="util-btn" onclick="openTailModal('${jsQuote(s.pid)}')" title="会話の直近の発言と応答を読む">末尾</button>
                         <button class="util-btn" onclick="toggleKeep('${jsQuote(s.pid)}', ${s.kept ? "false" : "true"}, ${s.launched_by_app ? "true" : "false"})"
                             title="${s.kept ? "残す印を外す（自動の区切りの対象に戻す）" : "自動で区切らずに残す"}">${s.kept ? "残すをやめる" : "残す"}</button>
                         <button class="util-btn danger" onclick="stopSession('${jsQuote(s.pid)}', '${jsQuote(s.name || '')}')">終了</button>
@@ -975,6 +1072,68 @@
             }
             showToast(`セッション（PID ${msg.pid}）を終了しました。`);
         });
+
+        /* ---- 会話の末尾を読む（GET /api/sessions/<pid>/tail。会話記録を読むだけ） ---- */
+        let tailPid = null;
+
+        function openTailModal(pid) {
+            const s = sessions.find(x => String(x.pid) === String(pid));
+            tailPid = pid;
+            // 同じ名前の子が2つあっても見分けられるよう PID を添える（送るモーダルと同じ形）
+            document.getElementById("tail-target-label").innerText =
+                s ? `${s.name || shortProjectName(s.cwd)}（PID ${pid}）` : `PID ${pid}`;
+            document.getElementById("tail-modal").style.display = "flex";
+            loadTail();
+        }
+
+        function hideTailModal() {
+            document.getElementById("tail-modal").style.display = "none";
+            tailPid = null;
+        }
+
+        async function loadTail() {
+            if (tailPid === null) return;
+            const pid = tailPid;
+            const body = document.getElementById("tail-body");
+            const errorBox = document.getElementById("tail-error");
+            errorBox.style.display = "none";
+            body.innerHTML = '<div class="pj-hint">読み込み中…</div>';
+            try {
+                const res = await fetch(`/api/sessions/${encodeURIComponent(pid)}/tail?limit=20`, { headers: SCREEN_HEADERS });
+                const data = await res.json().catch(() => ({}));
+                if (pid !== tailPid) return;  // 読んでいる間に別の行を開いた
+                if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                if (!data.items.length) {
+                    body.innerHTML = '<div class="pj-hint">まだ発言がありません。</div>';
+                    return;
+                }
+                body.innerHTML = data.items.map(item => {
+                    // 本アプリの自動の文・機械からの伝言も user として載る
+                    const who = item.role === "user" ? "送られた文（人・自動）" : "Claude";
+                    const tools = item.tools && item.tools.length
+                        ? `<div class="pj-hint" style="margin: 2px 0 0;">道具: ${escapeHtml(item.tools.join("、"))}</div>` : "";
+                    const text = item.text
+                        ? `<div style="white-space: pre-wrap; line-height: 1.5;">${escapeHtml(item.text)}</div>` : "";
+                    return `<div style="padding: 8px 0; border-bottom: 1px solid rgba(128,128,128,0.3);">
+                        <div class="pj-hint" style="margin: 0 0 2px;"><b>${who}</b> ${escapeHtml(formatTailTime(item.at))}</div>
+                        ${text}${tools}</div>`;
+                }).join("");
+                // 一番新しいもの（末尾）が見えるように
+                body.scrollTop = body.scrollHeight;
+            } catch (e) {
+                if (pid !== tailPid) return;
+                body.innerHTML = "";
+                errorBox.style.display = "block";
+                // サーバーの文（日本語の理由）はそのまま、通信の失敗などには前置きを付ける
+                errorBox.innerText = /^(会話記録|稼働中|limit)/.test(e.message) ? e.message : `末尾を読めませんでした: ${e.message}`;
+            }
+        }
+
+        function formatTailTime(at) {
+            const d = new Date(at);
+            if (!at || isNaN(d.getTime())) return "";
+            return d.toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        }
 
         /* ---- 動いているセッションへ /clear と本文を送る ----
            台帳に無い相手（このアプリが起こしていないもの）へは、警告を出し、
@@ -1201,14 +1360,27 @@
             hideProjectBrowser();
 
             document.getElementById("start-target-label").innerText = projectKey;
+            document.getElementById("start-account-row").style.display = "none";
+            loadStartAccount(projectKey);
             document.getElementById("start-error").style.display = "none";
             document.getElementById("start-screen").style.display = "none";
             document.getElementById("start-prompt").value = "";
             renderTemplates();
             renderLaunchOptions("start");
             const resumeSelect = document.getElementById("start-resume");
-            resumeSelect.innerHTML = `<option value="">新しい会話を始める</option><option value="" disabled>過去の会話を読み込み中...</option>`;
+            resumeSelect.dataset.loaded = "";
+            resumeSelect.innerHTML = `<option value="">おまかせ（前の会話があれば続き・無ければ新しく）</option><option value="" disabled>過去の会話を読み込み中...</option>`;
             socket.emit("list_resumable", { project: projectKey });
+            // 接続が切れて返事が来ないと「読み込み中」のまま残るので、20秒で言い換える
+            // （読めていない間は loaded が空のまま＝押すと前の会話を続ける側。動きは変えない）
+            const resumeRequest = String(Number(resumeSelect.dataset.request || 0) + 1);
+            resumeSelect.dataset.request = resumeRequest;
+            setTimeout(() => {
+                if (startTargetKey !== projectKey || resumeSelect.dataset.request !== resumeRequest ||
+                    resumeSelect.dataset.loaded === "1") return;
+                resumeSelect.innerHTML = `<option value="">おまかせ（前の会話があれば続き・無ければ新しく）</option>` +
+                    `<option value="" disabled>過去の会話を読めませんでした（閉じて開き直すと読み直します）</option>`;
+            }, 20000);
 
             const submitBtn = document.getElementById("start-submit");
             submitBtn.disabled = false;
@@ -1216,11 +1388,321 @@
             document.getElementById("start-modal").style.display = "flex";
         }
 
+        /* ---- アカウント（どちらの claude アカウントで起こすか） ----
+           作業場ごとの割り当てはサーバー（accounts.py）が覚えている。新規作成で選び、
+           既にある作業場は「アカウントを移す」でだけ替える（会話は持ち越せないので勝手に替えない）。 */
+        let accountsInfo = null;
+
+        async function fetchAccounts(projectKey) {
+            const query = projectKey ? `?project=${encodeURIComponent(projectKey)}` : "";
+            const res = await fetch(`/api/accounts${query}`, { headers: SCREEN_HEADERS });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.accounts) throw new Error(data.error || `HTTP ${res.status}`);
+            // 開始モーダル（作業場つき）の分だけ覚える。作成モーダルの読み込みで「移す」の情報を消さないように
+            if (projectKey) accountsInfo = data;
+            return data;
+        }
+
+        // 週の枠の使用%（「週 12% 使用」）。取れないときは「分からない」（推測しない）。理由は withReason のときだけ添える
+        // （選択肢の文に入れると、スマホの閉じた select で切れて読めないため）
+        function weeklyText(w, withReason) {
+            if (!w || !w.known) return `週の枠 分からない${withReason && w && w.reason ? "（" + w.reason + "）" : ""}`;
+            return `週 ${Math.round(w.used_percentage)}% 使用`;
+        }
+
+        // 5時間枠の使用%（「5時間枠 85% 使用」。週の枠とそろえる）。
+        // five_hour_unlimited のアカウント（Ultra）は値が取れなくても「分からない」でなく「上限なし」（サーバーも比べから外す）
+        function fiveHourText(a, withReason) {
+            const f = a && a.five_hour;
+            if ((!f || !f.known) && a && a.five_hour_unlimited) return "5時間枠 上限なし";
+            if (!f || !f.known) return `5時間枠 分からない${withReason && f && f.reason ? "（" + f.reason + "）" : ""}`;
+            return `5時間枠 ${Math.round(f.used_percentage)}% 使用`;
+        }
+
+        // 回復の時刻・古い値の添え書き（括弧は1つにまとめる）。時刻はサーバーが書いた文字列をそのまま使う
+        function windowExtras(info, resets) {
+            if (!info || !info.known) return "";
+            const parts = [];
+            if (info.reset_passed) parts.push("回復済み");
+            else if (resets) parts.push(`${resets} に回復`);
+            if (info.stale) parts.push("古い値");
+            return parts.length ? `（${parts.join("・")}）` : "";
+        }
+
+        // ▲ はサーバーが既定から外した枠（over_window）にだけ付ける
+        function overMark(a, window) {
+            return a.over_window === window ? " ▲" : "";
+        }
+
+        // 選択肢に出す短い形（「サブ ▲ 5時間枠 85% 使用・週 12%」）。時刻と古い値は注記へ
+        function accountOptionText(a) {
+            const w = a.weekly;
+            const weekly = w && w.known ? `週 ${Math.round(w.used_percentage)}%` : "週の枠 分からない";
+            return `${a.label}${a.over_window ? " ▲" : ""} ${fiveHourText(a, false)}・${weekly}`;
+        }
+
+        // 1アカウントの詳しい形（回復の時刻・古い値・分からない理由つき）。
+        // weeklyResets が false なら週の枠の回復時刻を出さない（一覧の上の行がスマホで折り返さないように）
+        function accountDetailText(a, withReason, weeklyResets = true) {
+            return `${fiveHourText(a, withReason)}${overMark(a, "five_hour")}${windowExtras(a.five_hour, a.five_hour_resets)}` +
+                `・${weeklyText(a.weekly, withReason)}${overMark(a, "weekly")}` +
+                `${windowExtras(a.weekly, weeklyResets ? a.weekly_resets : "")}`;
+        }
+
+        // 分からなかった枠で読みに行った置き場（statusline のフォルダ）。両方の枠で同じなら1回だけ
+        function accountPlaceText(a) {
+            const places = [a.five_hour_unlimited ? null : a.five_hour, a.weekly]
+                .filter(w => w && !w.known && w.place)
+                .map(w => w.place);
+            const unique = [...new Set(places)];
+            return unique.length ? `（読んだ置き場: ${unique.join("・")}）` : "";
+        }
+
+        // 選択肢の下に出す注記。使えない・既定から外した（目安の%はここにだけ出す）・時刻や古い値・分からない理由と置き場
+        function accountNotes(list) {
+            return list.map(a => {
+                if (!a.usable) return `${a.label}: 設定に誤りがあり使えません`;
+                if (a.over_line) return `${a.over_line}。新しいセッションの既定にしません`;
+                return `${a.label}: ${accountDetailText(a, true)}${accountPlaceText(a)}`;
+            }).filter(Boolean).join("\n");
+        }
+
+        // 一覧の上に出す、アカウントごとの枠（何本まで載せられるかを人が見て決めるため）。スマホで読めるよう1アカウント1行
+        function accountLimitsText() {
+            if (accountList.length < 2) return "";
+            return "アカウントの枠（▲＝5時間枠が目安以上か週の枠を使い切り・新しいセッションの既定にしない）\n" + accountList.map(a =>
+                `${a.label}: ${accountDetailText(a, false, false)}｜${a.running || 0}本（作業中${a.busy || 0}本）`
+            ).join("\n");
+        }
+
+        // 枠を使い切って止まった行の文。claude は時刻を過ぎても自分では再開しないので、本アプリが頼むか
+        // （quota_resume・状態は s.quota_resume）、管理役が扱うか、人が手で頼むかを書き分ける。
+        // サーバーは回復の後も人の次の入力までは返し続ける（recovered）ので、そのときは回復後の文に切り替える
+        function quotaStopText(s) {
+            const q = s.quota_stop;
+            const name = accountLabel(s.account);
+            const whose = `${name ? name + "の" : "このアカウントの"}${q.window_label}`;
+            // 手で頼むときの案内。ただの「続けて」は止めていた作業まで再開させうるので、頼む文の形と /clear を外すことを書く
+            const manualBody = "claude.ai で開いて「枠切れで中断した作業だけ続けて」と送ってください"
+                + "（行の「送る」から送るときは /clear のチェックを外す）。";
+            const manual = `続けるなら、${manualBody}`;
+            // 本アプリが頼まなかった・頼めなかったものは管理役へ知らせている（liaison）。そのときは人に手を頼まない
+            const handed = liaisonEnabled
+                ? `管理役へ知らせたので、管理役が扱います（急ぐときは、${manualBody}）`
+                : manual;
+            // on なら、戻って数分のうちに本アプリが「枠切れで中断した作業だけ続けて」と頼む（quota_resume.py）
+            const done = {
+                sent: "本アプリが枠切れで中断した作業の続きを頼みました。",
+                again_wait: `本アプリが一度続きを頼みましたが、まだ同じ枠が戻っていませんでした。${s.quota_resume_at ? s.quota_resume_at + " ごろに" : "しばらくあけて"}もう1回だけ自動で頼みます。`,
+                failed: `本アプリが続きを頼もうとしましたが送れませんでした。${handed}`,
+                too_old: `戻ってから6時間を過ぎたので、本アプリは続きを頼みません。${handed}`,
+                would_send: `試しの設定（dry_run）のあいだに戻ったので、本アプリは続きを頼みません。${manual}`,
+                handed: `試しの設定（dry_run）のあいだにこの枠切れを管理役へ任せたので、本アプリは続きを頼みません。${handed}`,
+                again: `本アプリが2回続きを頼みましたが、戻りの時刻を過ぎても同じ枠がまだ戻っていませんでした。本アプリはもう頼みません。${handed}`,
+            };
+            // 管理役に任せた枠切れは、戻る前でも本アプリは頼まない（戻る前に on へ切り替えても「自動で頼む」と出さない）
+            if (s.quota_resume === "handed") return `⛔ ${whose}${q.recovered ? "は回復しました" : "で止まっています"}。${done.handed}`;
+            if (q.recovered && done[s.quota_resume]) return `⛔ ${whose}は回復しました。${done[s.quota_resume]}`;
+            const auto = quotaResumeMode === "on";
+            if (q.recovered) {
+                return auto
+                    ? `⛔ ${whose}は回復しました。数分のうちに本アプリが枠切れで中断した作業の続きを自動で頼みます（戻ってから6時間を過ぎたものは頼みません）。`
+                    : `⛔ ${whose}は回復しました。${manual}`;
+            }
+            const then = auto
+                ? "戻ってから数分のうちに、本アプリが枠切れで中断した作業の続きを自動で頼みます。"
+                : `そのあと続けるなら、${manualBody}`;
+            const when = q.resets_at
+                ? `${q.resets_at} から使えます。${then}`
+                : (auto ? `戻る時刻が分からないため、本アプリは自動では頼みません。${handed}`
+                        : `使えるようになったら、${manualBody}`);
+            // 移す先が無いとき（アカウントが1つ）は移す案内を出さない
+            const move = accountList.length >= 2
+                ? "急ぐときは、プロジェクトの ▶ で開く「セッションを開始」の「アカウントを移す…」で別のアカウントへ移せます。"
+                : "";
+            return `⛔ ${whose}を使い切って止まっています。${when}${move}`;
+        }
+
+        function mainAccountLabel() {
+            const list = (accountsInfo && accountsInfo.accounts) || accountList;
+            const main = list.find(a => a.main);
+            return main ? main.label : "既定のアカウント";
+        }
+
+        async function loadStartAccount(projectKey) {
+            try {
+                const data = await fetchAccounts(projectKey);
+                if (projectKey !== startTargetKey || !data.project) return;
+                if (data.project.error) {
+                    // 行き先を決められない（既定のアカウントの設定の誤り等）。起動もサーバーが同じ理由で断る
+                    document.getElementById("start-account-label").innerText = `決められません: ${data.project.error}（このままでは起動できません）`;
+                    document.getElementById("start-account-row").style.display = "block";
+                    return;
+                }
+                if (data.accounts.length < 2) return;
+                const a = data.accounts.find(x => x.name === data.project.account);
+                document.getElementById("start-account-label").innerText =
+                    `${a ? a.label : data.project.account}${({
+                        explicit_main: "（割り当て）",
+                        main_history: `（割り当てなし・この作業場の会話の記録があるので ${mainAccountLabel()} のまま）`,
+                        default: "（割り当てなし＝既定）",
+                    })[data.project.reason] || ""}` +
+                    (a ? ` ・ ${accountDetailText(a, true)}` : "");
+                document.getElementById("start-account-row").style.display = "block";
+            } catch (e) {
+                // 読めなくても起動はできる（サーバーが割り当てどおりに起こす）
+            }
+        }
+
+        // 新規作成のアカウント欄。読み込みが終わるまで「作成して開始」を止める
+        // （欄が出る前に押されて、黙って既定のアカウントで作られないように）
+        let createAccountsLoading = false;
+
+        async function loadCreateAccounts() {
+            const box = document.getElementById("create-account-box");
+            const select = document.getElementById("create-account");
+            const hint = document.getElementById("create-account-hint");
+            const submitBtn = document.getElementById("create-submit");
+            // 2つ以上あると分かっている機械（一覧で受け取った数）では、読み込み中を見せて待たせる
+            const expectChoice = accountList.length >= 2;
+            box.style.display = expectChoice ? "block" : "none";
+            select.innerHTML = `<option value="">アカウントを読み込み中...</option>`;
+            select.disabled = true;
+            hint.innerText = "";
+            createAccountsLoading = true;
+            if (expectChoice) submitBtn.disabled = true;
+            try {
+                const data = await fetchAccounts(null);
+                const usable = data.accounts.filter(a => a.usable);
+                if (data.accounts.length < 2 || !usable.length) { box.style.display = "none"; return; }
+                // trial_roles.json の取り込みを待つ間は、既定のアカウントにしか割り当てられない
+                const selectable = a => a.usable && (a.main || !data.pending_import);
+                const chosen = selectable(data.accounts.find(a => a.name === data.default) || {})
+                    ? data.default : (data.accounts.find(a => a.main) || {}).name;
+                select.innerHTML = data.accounts.map(a =>
+                    `<option value="${escapeHtml(a.name)}"${a.name === chosen ? " selected" : ""}${selectable(a) ? "" : " disabled"}>` +
+                    `${escapeHtml(!a.usable ? `${a.label} 使えません` : selectable(a) ? accountOptionText(a) : `${a.label} いまは選べません`)}</option>`
+                ).join("");
+                let notes = accountNotes(data.accounts);
+                if (data.pending_import) {
+                    notes = `いまは ${mainAccountLabel()} 以外を選べません（ほかのアカウントへの割り当ての取り込みを待っています: ${data.pending_import}）。` +
+                            (notes ? "\n" + notes : "");
+                }
+                hint.innerText =
+                    `既定: ${(data.accounts.find(a => a.name === data.default) || {}).label || data.default}（${data.default_reason}）。` +
+                    "作った作業場はこのアカウントに割り当て、以後も同じアカウントで起こします。" + (notes ? "\n" + notes : "");
+                box.style.display = "block";
+            } catch (e) {
+                if (expectChoice) {
+                    select.innerHTML = `<option value="">読めませんでした</option>`;
+                    hint.innerText = "アカウントを読めなかったので、割り当ての無い作業場の既定のアカウント（設定の unassigned_account・書いていなければ " +
+                        `${mainAccountLabel()}）で作ります（選び直すなら、閉じて開き直してください）。`;
+                }
+            } finally {
+                select.disabled = false;
+                createAccountsLoading = false;
+                if (!document.getElementById("create-name").placeholder.includes("命名中")) submitBtn.disabled = false;
+            }
+        }
+
+        function openMoveAccount() {
+            // 開き直しの途中で前の作業場の応答が後から着いたときは使わない
+            if (!startTargetKey || !accountsInfo || !accountsInfo.project ||
+                accountsInfo.project.project_key !== startTargetKey) return;
+            const current = accountsInfo.project.account;
+            if (accountsInfo.project.error) {
+                showToast(`いまはアカウントを移せません（${accountsInfo.project.error}）。`, 10000);
+                return;
+            }
+            if (accountsInfo.pending_import) {
+                showToast(`いまはアカウントを移せません（ほかのアカウントへの割り当ての取り込みを待っています: ${accountsInfo.pending_import}）。`, 8000);
+                return;
+            }
+            const others = accountsInfo.accounts.filter(a => a.name !== current && a.usable);
+            if (!others.length) {
+                const broken = accountsInfo.accounts.filter(a => a.name !== current && !a.usable);
+                showToast(broken.length
+                    ? `移す先にできるアカウントがありません（${broken.map(a => a.label).join("・")} は設定に誤りがあり使えません）。`
+                    : "移す先にできるアカウントがありません。");
+                return;
+            }
+            document.getElementById("move-account-target").innerText = startTargetKey;
+            document.getElementById("move-account-current").innerText = accountLabel(current) ||
+                (accountsInfo.accounts.find(a => a.name === current) || {}).label || current;
+            document.getElementById("move-account-to").innerHTML = others.map(a =>
+                `<option value="${escapeHtml(a.name)}">${escapeHtml(accountOptionText(a))}</option>`
+            ).join("");
+            document.getElementById("move-account-prompt").value = "";
+            document.getElementById("move-account-force").checked = false;
+            document.getElementById("move-account-error").style.display = "none";
+            const btn = document.getElementById("move-account-submit");
+            btn.disabled = false;
+            btn.innerText = "移して起こし直す";
+            document.getElementById("move-account-modal").style.display = "flex";
+        }
+
+        function hideMoveAccount() {
+            if (document.getElementById("move-account-submit").disabled) {
+                showToast("移している最中です。結果が出るまでお待ちください。");
+                return;
+            }
+            document.getElementById("move-account-modal").style.display = "none";
+        }
+
+        async function submitMoveAccount() {
+            const project = startTargetKey;
+            const to = document.getElementById("move-account-to").value;
+            const label = (accountsInfo.accounts.find(a => a.name === to) || {}).label || to;
+            if (!confirm(`「${project}」を ${label} へ移します。\n動いているセッションは止まり、前の会話は持ち越せません。よろしいですか？`)) return;
+            const btn = document.getElementById("move-account-submit");
+            const errorBox = document.getElementById("move-account-error");
+            btn.disabled = true;
+            btn.innerText = "移しています...（止めて、起こし直して、登録を待っています）";
+            errorBox.style.display = "none";
+            const body = {
+                project: project,
+                account: to,
+                prompt: document.getElementById("move-account-prompt").value.trim(),
+                force: document.getElementById("move-account-force").checked,
+                ...readLaunchOptions("start"),
+            };
+            try {
+                const res = await fetch("/api/accounts/move", { method: "POST", headers: SCREEN_HEADERS, body: JSON.stringify(body) });
+                const data = await res.json().catch(() => ({}));
+                btn.disabled = false;
+                btn.innerText = "移して起こし直す";
+                if (!res.ok || !data.ok) {
+                    errorBox.style.display = "block";
+                    errorBox.innerText = data.error || `移せませんでした（HTTP ${res.status}）。`;
+                    if (data.code === "busy") {
+                        errorBox.innerText = "この作業場のセッションは作業中です。終わってから移すか、" +
+                            "「作業中でも止めて移す」にチェックを入れて送り直してください。";
+                    }
+                    // 割り当てが移った後で失敗したとき（起こせなかった）も、後ろの表示を今の割り当てにする
+                    loadStartAccount(project);
+                    requestSessions();
+                    return;
+                }
+                hideMoveAccount();
+                hideStartSession();
+                const stopped = (data.stopped || []).length ? `（止めたセッション ${data.stopped.length} 件）` : "";
+                showToast(`「${project}」を ${label} へ移して起こし直しました${stopped}。` +
+                          (data.warning ? `\n⚠ ${data.warning}` : ""), data.warning ? 15000 : 5000);
+                requestSessions();
+            } catch (e) {
+                btn.disabled = false;
+                btn.innerText = "移して起こし直す";
+                errorBox.style.display = "block";
+                errorBox.innerText = `移せませんでした: ${e}`;
+            }
+        }
+
         // 過去の会話（resume の候補）。いま動いている会話は選べないようにする
         socket.on("resumable_list", (msg) => {
             if (!msg || msg.project !== startTargetKey) return;
             const select = document.getElementById("start-resume");
             const head = `<option value="">新しい会話を始める</option>`;
+            select.dataset.loaded = "1";
             if (!msg.ok) {
                 select.innerHTML = head + `<option value="" disabled>${escapeHtml(msg.error || "過去の会話を読めませんでした")}</option>`;
                 return;
@@ -1234,8 +1716,17 @@
                 // 題名はほぼプロジェクト名（-n で付く）で見分けにならないので、最初の指示を出す
                 const label = `${formatDateTime(new Date(it.updated_at).toISOString())} ${it.first_prompt || it.title || "（指示の記録なし）"}`;
                 const short = label.length > 70 ? label.slice(0, 70) + "…" : label;
-                return `<option value="${escapeHtml(it.session_id)}"${it.live ? " disabled" : ""} title="${escapeHtml(it.title)}">${escapeHtml(short)}${it.live ? "（実行中）" : ""}</option>`;
+                return `<option value="${escapeHtml(it.session_id)}"${it.live ? " disabled" : ""} title="${escapeHtml(it.title)}">${it.headless ? "（無人実行）" : ""}${escapeHtml(short)}${it.live ? "（実行中）" : ""}</option>`;
             }).join("") + `</optgroup>`;
+            // 既定は、いちばん新しい対話の会話の続き（動いていなければ）。新しい会話は選んだときだけ
+            // （起こし直すたびに新しい会話になり、同じ名前の行が並んだため・2026-10-28）。
+            // 無人実行（claude -p）の会話は既定にしない（サーバーの latest_resumable_id と同じ選び方）
+            const latest = items.find(it => !it.headless);
+            if (latest && !latest.live) {
+                select.value = latest.session_id;
+                const first = select.querySelector(`option[value="${CSS.escape(latest.session_id)}"]`);
+                if (first) first.textContent = "（続き・既定）" + first.textContent;
+            }
         });
 
         function hideStartSession() {
@@ -1255,7 +1746,12 @@
             document.getElementById("start-error").style.display = "none";
             document.getElementById("start-screen").style.display = "none";
             const resumeId = document.getElementById("start-resume").value;
-            socket.emit("start_session", { ...launchOptions, project: startTargetKey, prompt: promptText, resume: resumeId });
+            // 一覧を読んだ後に「新しい会話を始める」を選んだときだけ new を付ける
+            // （付けないとサーバーが前の会話を続ける。読み込み前に押したときも続ける側）
+            const chosenNew = !resumeId && document.getElementById("start-resume").dataset.loaded === "1";
+            // 手で起こす起動に、前の作成の警告（起動の結果が来なかった分）を付けない
+            pendingCreateWarning = "";
+            socket.emit("start_session", { ...launchOptions, project: startTargetKey, prompt: promptText, resume: resumeId, new: chosenNew });
         }
 
         socket.on("session_start_result", (msg) => {
@@ -1267,10 +1763,15 @@
             createBtn.disabled = false;
             createBtn.innerText = "作成して開始";
 
+            // 作成の口から来た起動なら、作成時の警告（git・NOW.md）を一緒に出す
+            const createWarning = pendingCreateWarning;
+            pendingCreateWarning = "";
+
             if (!msg.ok) {
                 const errorBox = document.getElementById("start-error");
                 errorBox.style.display = "block";
-                errorBox.innerText = msg.error || "セッションの起動に失敗しました。";
+                errorBox.innerText = (msg.error || "セッションの起動に失敗しました。") +
+                                     (createWarning ? `\n⚠ ${createWarning}` : "");
                 // 画面に何が出ているか分かるときは、そのまま見せる
                 if (msg.screen && msg.screen.length) {
                     const dump = document.getElementById("start-screen");
@@ -1287,8 +1788,9 @@
             const session = msg.session || {};
             const how = msg.resumed ? "続きから再開しました" : "開始しました";
             // 権限が指定と違ったという注意は守りに関わるので、長めに出す
+            const warning = [createWarning, msg.warning].filter(Boolean).join("\n");
             showToast(`セッション「${session.name || ''}」を${how}。claude.ai から操作できます。` +
-                      (msg.warning ? `\n⚠ ${msg.warning}` : ""), msg.warning ? 15000 : 4000);
+                      (warning ? `\n⚠ ${warning}` : ""), warning ? 15000 : 4000);
             requestSessions();
             socket.emit("list_parent_projects");
         });
@@ -1658,6 +2160,7 @@
             renderLocationButtons("create-location-group", true, selectedCreateLocation, "selectCreateLocation");
             updateCreateParentLabel();
             renderLaunchOptions("create");
+            loadCreateAccounts();
 
             const submitBtn = document.getElementById("create-submit");
             submitBtn.disabled = false;
@@ -1725,6 +2228,14 @@
             }
         });
 
+        // 作成時の警告（git・NOW.md を用意できなかった等）。直後の起動の結果の表示まで持ち越す
+        let pendingCreateWarning = "";
+
+        // 作成時の警告の見せ方を1つにそろえる（どの作業場の話かを頭に付ける）
+        function createWarningText(project) {
+            return project && project.warning ? `作成時の警告（${project.project_key}）: ${project.warning}` : "";
+        }
+
         function submitCreateProject() {
             const name = document.getElementById("create-name").value.trim();
             const chat = document.getElementById("create-chat").value.trim();
@@ -1741,6 +2252,12 @@
                 return;
             }
 
+            if (createAccountsLoading) {
+                errorBox.style.display = "block";
+                errorBox.innerText = "アカウントを読み込み中です。少し待ってから押してください。";
+                return;
+            }
+
             const launchOptions = readLaunchOptions("create");
             if (!confirmLaunchOptions(launchOptions)) return;
             saveLaunchPrefs(launchOptions);
@@ -1748,23 +2265,39 @@
             const submitBtn = document.getElementById("create-submit");
             submitBtn.disabled = true;
             submitBtn.innerText = "作成中...";
-            socket.emit("create_project", { ...launchOptions, name: name, chat: chat, location: selectedCreateLocation });
+            pendingCreateWarning = "";
+            const accountBox = document.getElementById("create-account-box");
+            const account = accountBox.style.display !== "none" ? document.getElementById("create-account").value : "";
+            socket.emit("create_project", { ...launchOptions, name: name, chat: chat, location: selectedCreateLocation, account: account });
         }
 
         socket.on("project_create_result", (msg) => {
             const submitBtn = document.getElementById("create-submit");
 
             if (!msg.ok) {
-                submitBtn.disabled = false;
-                submitBtn.innerText = "作成して開始";
                 const errorBox = document.getElementById("create-error");
                 errorBox.style.display = "block";
-                errorBox.innerText = msg.error || "プロジェクトの作成に失敗しました。";
+                const warningText = msg.project ? createWarningText(msg.project) : "";
+                errorBox.innerText = (msg.error || "プロジェクトの作成に失敗しました。") +
+                                     (warningText ? `\n⚠ ${warningText}` : "");
+                if (msg.project) {
+                    // フォルダはもうできている。押し直すと同じ名前で別のエラーになるので押させない
+                    submitBtn.disabled = true;
+                    submitBtn.innerText = "作成済み（閉じてください）";
+                    socket.emit("list_parent_projects");
+                } else {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = "作成して開始";
+                }
                 return;
             }
 
             const project = msg.project;
-            showToast(`プロジェクトを作成しました: ${project.project_key}。セッションを起動しています...`);
+            // 直後の起動の結果の表示がこのトーストを置き換えるので、警告はそちらにも持ち越す
+            pendingCreateWarning = createWarningText(project);
+            const acct = accountList.length >= 2 && project.account ? `（${accountLabel(project.account)}）` : "";
+            showToast(`プロジェクトを作成しました: ${project.project_key}${acct}。セッションを起動しています...` +
+                      (pendingCreateWarning ? `\n⚠ ${pendingCreateWarning}` : ""), pendingCreateWarning ? 15000 : 4000);
             submitBtn.disabled = true;
             submitBtn.innerText = "セッションを起動中...";
             socket.emit("list_parent_projects");

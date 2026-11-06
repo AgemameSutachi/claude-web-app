@@ -5,7 +5,7 @@ access_guard（接続元の絞り込み・合言葉）、本体の before_reques
 置き場・機械名・Origin の設定、一斉指示の定型文、配る束（make_bundle）を見る。
 
 実行方法:
-    <python> -m unittest discover -s tests -v
+    <python> -m pytest tests  （conftest.py の差し替えが効くよう pytest で）
 """
 
 import importlib.util
@@ -329,10 +329,29 @@ class TestNoGuardDefaults(unittest.TestCase):
             ["[100.70.0.1]"],
             ["-pc"],
             ["[fd7a::1]junk]"],
+            # IP の書き損じ・続くドット・どこでもない宛先（2026-10-31 評価の低の残りを直した）
+            ["999.1.1.1"],
+            ["100.70.0"],
+            ["a..b"],
+            ["0.0.0.0"],
+            ["::"],
+            ["[::]"],
         ):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     parse(bad)
+        # 数字で始まる名前・数字だけでない名前は通る
+        self.assertEqual(
+            parse(["1password-pc", "pc1.local", "100.70.0.1"]),
+            frozenset({"1password-pc", "pc1.local", "100.70.0.1"}),
+        )
+        # 文面は角括弧を記号の名前で書く・どこでもない宛先は理由を出す
+        with self.assertRaises(ValueError) as caught:
+            parse(["[my-pc]"])
+        self.assertIn("角括弧（[ と ]）は IPv6 にだけ", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            parse(["0.0.0.0"])
+        self.assertIn("待ち受けの書き方", str(caught.exception))
 
     def test_cross_site_post_refused_without_guard(self):
         res = self.client.post(

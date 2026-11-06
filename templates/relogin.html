@@ -70,11 +70,18 @@
         <a href="/">← セッション管理へ</a>
     </header>
     <main>
+        <div class="card hidden" id="account-card">
+            <h2>アカウント</h2>
+            <select id="account" onchange="onAccountChange()"
+                    style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--btn-border); background: #0f172a; color: var(--text-color); font-size: 0.9rem;"></select>
+            <div class="small" id="account-expiries"></div>
+        </div>
+
         <div class="card">
             <h2>いまのログインの期限</h2>
             <div class="big" id="refresh-expiry">読み込み中...</div>
             <div class="row" id="refresh-left"></div>
-            <div class="row">この期限が切れると、{{ machine_name }} のすべてのセッションが使えなくなります。切れる前に下の手順で更新してください。</div>
+            <div class="row">この期限が切れると、{{ machine_name }} でこのアカウントを使うすべてのセッションが使えなくなります。切れる前に下の手順で更新してください。</div>
             <div class="small" id="access-expiry"></div>
         </div>
 
@@ -134,8 +141,8 @@
             const access = document.getElementById("access-expiry");
             left.innerText = "";
             access.innerText = "";
-            if (!expiry.exists) { box.innerText = "資格情報が見つかりません（ログインしていません）"; box.className = "big bad"; return; }
             if (expiry.error) { box.innerText = expiry.error; box.className = "big bad"; return; }
+            if (!expiry.exists) { box.innerText = "資格情報が見つかりません（ログインしていません）"; box.className = "big bad"; return; }
             const ms = expiry.refresh_expires_at;
             box.innerText = ms ? `${fmt(ms)} まで` : "期限を読めませんでした";
             box.className = "big";
@@ -166,13 +173,17 @@
 
         function renderLogin(login) {
             const box = document.getElementById("login-box");
+            const select = document.getElementById("account");
             if (login && login.active) {
                 box.classList.remove("hidden");
+                const who = accountRows.length >= 2 && login.account ? `（${escapeHtml(labelOf(login.account))} のログイン）` : "";
                 document.getElementById("url-box").innerHTML = login.url
-                    ? `ログイン用の URL（タップして開く）:<br><a href="${escapeHtml(login.url)}" target="_blank" rel="noopener">${escapeHtml(login.url)}</a>`
-                    : "URL を取り出せませんでした。「やめる」を押してから、もう一度「開始」を押してください。";
+                    ? `ログイン用の URL${who}（タップして開く）:<br><a href="${escapeHtml(login.url)}" target="_blank" rel="noopener">${escapeHtml(login.url)}</a>`
+                    : `URL を取り出せませんでした${who}。「やめる」を押してから、もう一度「開始」を押してください。`;
+                if (login.account && accountRows.length >= 2) { select.value = login.account; select.disabled = true; }
             } else {
                 box.classList.add("hidden");
+                select.disabled = false;
             }
         }
 
@@ -185,11 +196,65 @@
             return await res.json().catch(() => ({ ok: false, error: `応答を読めませんでした（HTTP ${res.status}）。ページを開き直してください。` }));
         }
 
+        // アカウントが2つ以上あるときだけ選ばせる。期限・開始・確かめは選んだアカウントのもの
+        let accountRows = [];
+
+        function selectedAccount() {
+            const el = document.getElementById("account");
+            return accountRows.length >= 2 ? el.value : "";
+        }
+
+        function expiryOf(name) {
+            const row = accountRows.find(a => a.name === name);
+            return row ? row.expiry : null;
+        }
+
+        function renderAccounts(rows, loginAccount) {
+            accountRows = rows || [];
+            const card = document.getElementById("account-card");
+            if (accountRows.length < 2) { card.classList.add("hidden"); return; }
+            const select = document.getElementById("account");
+            const keep = loginAccount || select.value || accountRows[0].name;
+            // 設定に誤りがあるアカウントは選ばせない（開始を押しても直らないため）
+            select.innerHTML = accountRows.map(a =>
+                `<option value="${escapeHtml(a.name)}"${a.name === keep ? " selected" : ""}${a.usable === false ? " disabled" : ""}>` +
+                `${escapeHtml(a.label)}${a.usable === false ? "（設定に誤りがあり使えません）" : ""}</option>`).join("");
+            // ログインの手続きを開いている間は、そのアカウントに固定する（別のアカウントの手続きと取り違えないように）
+            select.disabled = !!loginAccount;
+            document.getElementById("account-expiries").innerText = accountRows.map(a => {
+                const e = a.expiry || {};
+                const text = e.error ? e.error : !e.exists ? "資格情報なし（ログインしていません）" : `${fmt(e.refresh_expires_at)} まで`;
+                return `${a.label}: ${text}`;
+            }).join("\n");
+            card.classList.remove("hidden");
+        }
+
+        function labelOf(name) {
+            const row = accountRows.find(a => a.name === name);
+            return row ? row.label : (name || "");
+        }
+
+        function onAccountChange() {
+            const name = selectedAccount();
+            if (name) renderExpiry(expiryOf(name));
+            refreshBefore = null;
+        }
+
+        async function refreshAccountsOnly() {
+            try {
+                const data = await api("/api/relogin");
+                if (!data.accounts) return;
+                renderAccounts(data.accounts, data.login && data.login.active ? data.login.account : null);
+                if (selectedAccount()) renderExpiry(expiryOf(selectedAccount()));
+            } catch (e) { /* 一覧の読み直しに失敗しても、送った結果の表示はそのまま */ }
+        }
+
         async function refresh() {
             try {
                 const data = await api("/api/relogin");
                 if (!data.expiry) { showMessage(data.error || "期限を読めませんでした。ページを開き直してください。", "bad"); return; }
-                renderExpiry(data.expiry);
+                renderAccounts(data.accounts, data.login && data.login.account);
+                renderExpiry(selectedAccount() ? expiryOf(selectedAccount()) : data.expiry);
                 renderLogin(data.login);
                 if (data.login && data.login.active) {
                     showMessage("前に始めたログインの手続きが開いています。URL が古いと感じたら「やめる」→「開始」でやり直してください。");
@@ -205,14 +270,14 @@
             showMessage("ログインの手続きを始めています...（1分ほどかかることがあります）");
             showScreen([]);
             try {
-                const data = await api("/api/relogin/start", {});
+                const data = await api("/api/relogin/start", { account: selectedAccount() });
                 if (!data.ok) {
                     // 失敗したらサーバーが手続きを閉じている
                     showMessage(`${data.error}\nもう一度「開始」を押してください。続くなら ${MACHINE_NAME} のアプリのログを見てください。`, "bad");
                     renderLogin({ active: false });
                     return;
                 }
-                renderLogin({ active: true, url: data.url });
+                renderLogin({ active: true, url: data.url, account: data.account });
                 if (data.url) {
                     showMessage("URL を開いてログインし、表示された認証コードを下の欄に貼ってください。");
                 } else {
@@ -250,6 +315,8 @@
                 }
                 showMessage(data.message, "ok");
                 renderLogin({ active: false });
+                // 各アカウントの期限の一覧も読み直す（選んだアカウントの表示を最新に）
+                refreshAccountsOnly();
             } catch (e) {
                 showMessage(NETWORK_HINT, "bad");
             } finally {
@@ -278,7 +345,7 @@
             el.innerText = "確かめています...（数十秒）";
             el.className = "message";
             try {
-                const data = await api("/api/relogin/check", {});
+                const data = await api("/api/relogin/check", { account: selectedAccount() });
                 renderExpiry(data.expiry);
                 const now = data.expiry && data.expiry.refresh_expires_at;
                 const change = refreshBefore && now

@@ -36,20 +36,50 @@ from xml.sax.saxutils import escape as xml_escape
 
 import psutil
 
+import accounts
 import safe_console
 
 # --- 定数定義 ---------------------------------------------------------------
 
-CLAUDE_HOME = os.path.join(os.path.expanduser("~"), ".claude")
+# 本家のアカウントの置き場。ユーザーのフォルダは HOME / USERPROFILE ではなく Windows の既知フォルダから取る
+# （本家でないアカウントの子から読まれても、本家を取り違えない・accounts.real_user_dir）
+CLAUDE_HOME = os.path.join(accounts.USER_DIR, ".claude")
 
 # claude が起動中セッションの状態を書き出すフォルダ（ファイル名は pid.json）
 SESSIONS_DIR = os.path.join(CLAUDE_HOME, "sessions")
 
 # claude 本体の設定ファイル。フォルダの信頼状態もここに記録される。
-CLAUDE_CONFIG = os.path.join(os.path.expanduser("~"), ".claude.json")
+CLAUDE_CONFIG = os.path.join(accounts.USER_DIR, ".claude.json")
 
 # 設定ファイルを書き換える前に取っておく控え（上書き事故からの復旧用）
 CLAUDE_CONFIG_BACKUP = CLAUDE_CONFIG + ".claude-web-app.bak"
+
+
+def _home_for(cwd):
+    """その作業場に割り当てたアカウントの claude の置き場（本家は CLAUDE_HOME・accounts.py）。"""
+    return accounts.claude_home(accounts.account_for(cwd), CLAUDE_HOME)
+
+
+def _account_homes():
+    """生きているセッション・会話の記録を探す (アカウントの名前, 置き場) の並び（本家が先）。
+
+    割り当てに関わらず、設定にある置き場はすべて見る（移した後も前のアカウントの会話が見えるように）。
+    """
+    pairs = []
+    for account in accounts.definitions():
+        if account["main"]:
+            pairs.append((account["name"], CLAUDE_HOME))
+        elif not account["error"] and os.path.normcase(
+            account["config_dir"]
+        ) != os.path.normcase(CLAUDE_HOME):
+            pairs.append((account["name"], account["config_dir"]))
+    return pairs
+
+
+def _all_homes():
+    """生きているセッション・会話の記録を探す置き場（本家が先）。"""
+    return [home for _, home in _account_homes()]
+
 
 # claude.ai のセッション画面のURL。bridgeSessionId を後ろに繋ぐ。
 CLAUDE_WEB_BASE = "https://claude.ai/code/"
@@ -128,9 +158,7 @@ ELEVATION_RUN_LEVELS = {"admin": "HighestAvailable", "standard": "LeastPrivilege
 # ★AppData 配下に置かないこと。本アプリの venv は Microsoft Store 版 Python が元で、
 #   AppData への書き込みはパッケージ専用フォルダへ仮想化され、schtasks や
 #   起動役（別プロセス）からは「パスが見つかりません」になる（2026-09-24 実測）。
-TASK_LAUNCH_DIR = os.path.join(
-    os.path.expanduser("~"), ".claude-web-app", "task-launch"
-)
+TASK_LAUNCH_DIR = os.path.join(accounts.USER_DIR, ".claude-web-app", "task-launch")
 
 # タスク経由の起動を待つ時間（秒）。実測では 0.3〜0.5 秒。
 TASK_LAUNCH_TIMEOUT_SEC = 30
@@ -155,7 +183,7 @@ def launch_option_choices():
     }
 
 
-def build_launch_args(model=None, permission_mode=None, effort=None):
+def build_launch_args(model=None, permission_mode=None, effort=None, chrome=None):
     """起動オプションを検証して claude のコマンドライン引数へ変換する。
 
     画面から届いた値をそのまま argv に積まないよう、定義済みの選択肢に
@@ -165,6 +193,9 @@ def build_launch_args(model=None, permission_mode=None, effort=None):
         model: モデル名（MODEL_CHOICES の値。空・None なら指定しない）
         permission_mode: 権限モード（PERMISSION_MODE_CHOICES の値）
         effort: 思考の深さ（EFFORT_CHOICES の値）
+        chrome: True なら `--chrome`（Claude in Chrome の道具を付ける。道具は起動時にしか付かない）、
+            False なら `--no-chrome`（設定の claudeInChromeDefaultEnabled が真でも付けない）。
+            既定の None は何も足さない（設定に従う＝今までどおり）
 
     Returns:
         list[str]: 追加する引数
@@ -172,7 +203,9 @@ def build_launch_args(model=None, permission_mode=None, effort=None):
     Raises:
         SessionError: 選択肢に無い値が指定された場合
     """
-    args = []
+    if chrome is not None and not isinstance(chrome, bool):
+        raise SessionError(f"chrome の指定は true か false にしてください: {chrome!r}")
+    args = {True: ["--chrome"], False: ["--no-chrome"]}.get(chrome, [])
     for flag, value, choices, label in (
         ("--model", model, MODEL_CHOICES, "モデル"),
         ("--permission-mode", permission_mode, PERMISSION_MODE_CHOICES, "モード"),
@@ -192,12 +225,14 @@ def launch_options_of(pid, dropped=None):
     起こし直し（--resume）で元と同じモデル・モード・思考の深さにするため。
     選択肢に無い値（フルのモデル名など）は引き継がない（既定に任せる）。
     読めなければ空の dict。途中で /model で変えたモデルは引き継げない。
+    `--chrome` で起きていれば chrome: True、`--no-chrome` なら chrome: False も返す
+    （起こし直しで Chrome の道具が落ちない・設定の既定で黙って付かないように）。
 
     Args:
         dropped: リストを渡すと、引き継がない引数（--add-dir など）をそこへ足す
 
     Returns:
-        dict: model / permission_mode / effort のうち読めたもの
+        dict: model / permission_mode / effort / chrome のうち読めたもの
     """
     try:
         argv = psutil.Process(int(pid)).cmdline()
@@ -224,16 +259,24 @@ def launch_options_of(pid, dropped=None):
     head = argv[: argv.index("--")] if "--" in argv else argv
     if "permission_mode" not in found and "--dangerously-skip-permissions" in head:
         found["permission_mode"] = "bypassPermissions"
+    # 後に書いたほうが勝つ（--chrome の後の --no-chrome は付けない）
+    chrome_flags = [a for a in head[1:] if a in ("--chrome", "--no-chrome")]
+    if chrome_flags:
+        found["chrome"] = chrome_flags[-1] == "--chrome"
     if dropped is not None:
         carried = (
             "--model",
             "--permission-mode",
             "--effort",
+            "--chrome",
+            "--no-chrome",
             "--dangerously-skip-permissions",
             "-n",
             "--name",
             "--resume",
             "-r",
+            "--remote-control",
+            "--rc",
         )
         for arg in head[1:]:
             if arg.startswith("-") and arg.split("=", 1)[0] not in carried:
@@ -289,11 +332,13 @@ def sanitize_env(env=None):
 # --- フォルダの信頼登録 -----------------------------------------------------
 
 
-def _load_claude_config():
-    """claude 本体の設定ファイルを読み込む。無ければ空の辞書を返す。"""
-    if not os.path.exists(CLAUDE_CONFIG):
+def _load_claude_config(config_path=None):
+    """claude 本体の設定ファイルを読み込む。無ければ空の辞書を返す。
+    config_path を省くと本家の物（ほかのアカウントは CLAUDE_CONFIG_DIR 直下の物を渡す）。"""
+    config_path = config_path or CLAUDE_CONFIG
+    if not os.path.exists(config_path):
         return {}
-    with open(CLAUDE_CONFIG, "r", encoding="utf-8") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -306,14 +351,14 @@ def config_key_for(path):
     return os.path.abspath(path).replace("\\", "/")
 
 
-def is_trusted(path, config=None):
+def is_trusted(path, config=None, config_path=None):
     """フォルダが claude に信頼済みとして登録されているかを返す。"""
-    config = _load_claude_config() if config is None else config
+    config = _load_claude_config(config_path) if config is None else config
     entry = (config.get("projects") or {}).get(config_key_for(path))
     return bool(entry and entry.get("hasTrustDialogAccepted"))
 
 
-def ensure_trusted(path):
+def ensure_trusted(path, config_path=None):
     """フォルダを信頼済みとして登録する（未登録のときだけ書き込む）。
 
     切り離して起動したセッションは画面が見えないため、初回起動時に出る
@@ -326,6 +371,7 @@ def ensure_trusted(path):
 
     Args:
         path: 対象フォルダの絶対パス
+        config_path: 書く設定ファイル（省くと本家の ~/.claude.json）
 
     Returns:
         True なら今回書き込んだ（False は既に信頼済みで何もしなかった）
@@ -333,9 +379,18 @@ def ensure_trusted(path):
     Raises:
         SessionError: 設定ファイルの読み書きに失敗した場合
     """
+    config_path = config_path or CLAUDE_CONFIG
+    if config_path != CLAUDE_CONFIG and not os.path.exists(config_path):
+        # 本家でないアカウントの .claude.json は、そのアカウントで1度ログインしたときに claude が作る。
+        # ここで projects だけの殻を作ると、claude が初回の案内（onboarding）から始めて切り離した起動が止まる
+        raise SessionError(
+            f"アカウントの設定ファイル {config_path} がありません。"
+            "先にそのアカウント（CLAUDE_CONFIG_DIR）で claude を1度起こしてログインするか、"
+            "作業場を別のアカウントへ移してください（画面の「アカウントを移す」）"
+        )
     key = config_key_for(path)
     try:
-        config = _load_claude_config()
+        config = _load_claude_config(config_path)
     except (OSError, ValueError) as e:
         raise SessionError(f"claude の設定ファイルを読めませんでした: {e}")
 
@@ -351,13 +406,13 @@ def ensure_trusted(path):
 
     try:
         # 既存の内容の控えを残してから書き換える
-        if os.path.exists(CLAUDE_CONFIG):
-            shutil.copyfile(CLAUDE_CONFIG, CLAUDE_CONFIG_BACKUP)
+        if os.path.exists(config_path):
+            shutil.copyfile(config_path, config_path + ".claude-web-app.bak")
 
-        temp_path = CLAUDE_CONFIG + ".tmp-claude-web-app"
+        temp_path = config_path + ".tmp-claude-web-app"
         with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
-        os.replace(temp_path, CLAUDE_CONFIG)
+        os.replace(temp_path, config_path)
     except OSError as e:
         raise SessionError(f"claude の設定ファイルを更新できませんでした: {e}")
 
@@ -601,7 +656,7 @@ def _build_task_xml(target, command, arguments, run_level="LeastPrivilege"):
 """
 
 
-def _spawn_via_task(argv, cwd, target, run_level="LeastPrivilege"):
+def _spawn_via_task(argv, cwd, target, run_level="LeastPrivilege", env_overrides=None):
     """使い捨てのタスク経由で、指定の Windows セッションに argv を起動する。
 
     セッション0の本アプリからセッション1へプロセスを作るには、本来 SYSTEM
@@ -615,6 +670,7 @@ def _spawn_via_task(argv, cwd, target, run_level="LeastPrivilege"):
         cwd: 作業ディレクトリ
         target: 起動先セッション（"0" または "1"）
         run_level: タスクの RunLevel（"LeastPrivilege" / "HighestAvailable"）
+        env_overrides: 起動役が claude の env に足す差分（アカウントの置き場。accounts.ENV_KEYS だけ）
 
     Returns:
         int: 起動したプロセスの pid
@@ -638,7 +694,7 @@ def _spawn_via_task(argv, cwd, target, run_level="LeastPrivilege"):
     try:
         with open(request_path, "w", encoding="utf-8") as f:
             json.dump(
-                {"argv": argv, "cwd": cwd, "response": response_path},
+                _launcher_request(argv, cwd, response_path, env_overrides),
                 f,
                 ensure_ascii=False,
             )
@@ -740,7 +796,18 @@ def _last_error_text():
     return f"error={code}: {ctypes.FormatError(code).strip()}"
 
 
-def _spawn_restricted(argv, cwd):
+def _launcher_request(argv, cwd, response_path, env_overrides):
+    """起動役（session_task_launcher.py）への要求。env の差分は決まったキーだけを載せる。"""
+    request = {"argv": argv, "cwd": cwd, "response": response_path}
+    overrides = {
+        k: v for k, v in (env_overrides or {}).items() if k in accounts.ENV_KEYS
+    }
+    if overrides:
+        request["env_overrides"] = overrides
+    return request
+
+
+def _spawn_restricted(argv, cwd, env_overrides=None):
     """本アプリのトークンから「通常の利用者」相当のトークンを作り、起動役を起こして pid を返す。
 
     セッション0の S4U タスクは LeastPrivilege を指定しても昇格したまま動く
@@ -776,7 +843,7 @@ def _spawn_restricted(argv, cwd):
     try:
         with open(request_path, "w", encoding="utf-8") as f:
             json.dump(
-                {"argv": argv, "cwd": cwd, "response": response_path},
+                _launcher_request(argv, cwd, response_path, env_overrides),
                 f,
                 ensure_ascii=False,
             )
@@ -891,6 +958,9 @@ def launch_session(
     win_session=None,
     elevation=None,
     resume_session_id=None,
+    account=None,
+    remote_control_name=None,
+    chrome=None,
 ):
     """本アプリから切り離した独立プロセスとして claude セッションを起動する。
 
@@ -913,11 +983,21 @@ def launch_session(
             起動する（本アプリと同じセッション・同じ権限なら二段起動のまま）
         resume_session_id: 続きから再開する過去の会話の sessionId（`--resume`）。
             そのプロジェクトの会話記録にあり、いま動いていないものに限る
+        account: 起こすアカウントの名前（省略時は作業場の割り当て・accounts.py）。
+            割り当てと違う名前は断る（会話の記録は置き場ごとに分かれるので、移すときは
+            割り当てを書き換えてから起こす）。どの道（二段起動・タスク・制限トークン）でも
+            アカウントの置き場を env に載せて起こす
+        remote_control_name: claude.ai の Remote Control の行の題名（`--remote-control <名前>`）。
+            None なら再開のときだけ表示名を渡す（既定）。"" なら渡さない。
+            再開で新しく作られる行は、渡さないと自動の名前（のち発言から付け替わる題名）になる
+        chrome: True なら `--chrome`、False なら `--no-chrome`（Claude in Chrome の道具）。
+            既定の None は何も足さない（設定に従う）
 
     Returns:
         dict: ``pid``（起動したプロセスID）、``name``、``trusted``（今回登録したか）、
         ``win_session``（実際に起動したセッション番号）、``elevated``（実際に
-        昇格しているか。読めなければ None）、``resumed``（再開した sessionId か None）
+        昇格しているか。読めなければ None）、``resumed``（再開した sessionId か None）、
+        ``account``（起こしたアカウントの名前）
 
     Raises:
         SessionError: 起動に失敗した場合
@@ -926,7 +1006,7 @@ def launch_session(
         raise SessionError(f"作業ディレクトリが見つかりません: {cwd}")
 
     # 不正な指定は、信頼登録などの副作用を起こす前に弾く
-    option_args = build_launch_args(model, permission_mode, effort)
+    option_args = build_launch_args(model, permission_mode, effort, chrome)
     target = str(win_session) if win_session not in (None, "") else ""
     if target and target not in {v for v, _ in WIN_SESSION_CHOICES}:
         raise SessionError(f"起動先セッションの指定が不正です: {win_session}")
@@ -946,26 +1026,17 @@ def launch_session(
             "このアプリがデスクトップ側で動いているため、バックグラウンド（セッション0）へは"
             "通常権限で起動できません。起動先をデスクトップにするか、権限を既定にしてください"
         )
-    if resume_session_id:
-        validate_resume_target(cwd, resume_session_id)
-
-    exe = resolve_claude_exe(claude_exe)
-    display_name = name or os.path.basename(os.path.normpath(cwd))
-
-    trusted_now = False
-    if trust:
-        trusted_now = ensure_trusted(cwd)
-
-    if resume_session_id:
-        # 再開では -n を付けない（付けると元の会話の題名を上書きしてしまう）
-        argv = [exe, "--resume", resume_session_id] + option_args
-    else:
-        argv = [exe, "-n", display_name] + option_args
-    if prompt:
-        # 最初の指示は引数として渡す。TUI へ文字を流し込む必要がない。
-        # 指示が `-` で始まっても引数と誤認されないよう `--` で区切る。
-        argv += ["--", prompt]
-
+    # アカウントは、再開の確かめ・信頼登録（副作用）より前に決める
+    try:
+        assigned = accounts.account_for(cwd)
+        if account and str(account).strip().lower() != assigned["name"]:
+            raise accounts.AccountError(
+                f"この作業場は {assigned['label']} に割り当てられています（{account} では起こしません）。"
+                "アカウントを替えるときは「アカウントを移す」を使ってください"
+            )
+        assigned = accounts.require_usable(assigned["name"])
+    except accounts.AccountError as e:
+        raise SessionError(str(e))
     current = process_win_session(os.getpid())
     same_session = not target or (target == "0") == (current == 0)
     # 本アプリと同じセッションで、本アプリと同じ権限を選んだときは、タスクを通さない
@@ -974,20 +1045,76 @@ def launch_session(
     own_elevated = process_elevation(os.getpid()) is True
     own_matches = bool(elevation) and own_elevated == (elevation == "admin")
     if elevation == "standard" and same_session and own_elevated:
+        how = "restricted"
+    elif elevation and not (same_session and own_matches):
+        how = "task-elevation"
+    elif not same_session:
+        how = "task"
+    else:
+        how = "detached"
+    # どの道でもアカウントの置き場を載せる（タスク・制限トークンの道は起動役が要求の差分を足す）
+    overrides = accounts.env_overrides(assigned)
+    if resume_session_id:
+        # 中の transcript_dir_for が割り当てたアカウントの置き場を見る
+        validate_resume_target(cwd, resume_session_id)
+
+    exe = resolve_claude_exe(claude_exe)
+    display_name = name or os.path.basename(os.path.normpath(cwd))
+
+    # 既定（本家でない unassigned_account）で起こすなら、台帳に書いて固定する（書けなければ起こさない）。
+    # 再開の確かめ・実行ファイルの解決で断られる起動では書かないよう、信頼登録と起動の直前で
+    try:
+        pinned = accounts.pin_default(cwd)
+    except (accounts.AccountError, OSError) as e:
+        raise SessionError(f"割り当てを台帳に書けないので起こしません: {e}")
+    mirror_error = ((pinned or {}).get("mirror") or {}).get("error")
+    if mirror_error:
+        print(
+            f"[Accounts] trial_roles.json の写しを書けませんでした: {mirror_error}",
+            flush=True,
+        )
+
+    trusted_now = False
+    if trust:
+        trusted_now = ensure_trusted(cwd, config_path=accounts.claude_json(assigned))
+
+    # 再開でも -n を付ける（手元の名前・/resume の題名。会話の題名はプロジェクト名で上書きされる）
+    argv = [exe, "-n", display_name] + option_args
+    if resume_session_id:
+        argv[1:1] = ["--resume", resume_session_id]
+    # 再開は既定で claude.ai の行の題名も渡す（どの経路の resume でも。外すときは呼び手が "" を渡す）。
+    # 再開で新しく作られる行（別のアカウント・前の行が使えないとき）は -n の名前が渡らず、題名を明示しない行は
+    # claude.ai が発言のたびに中身から題名を付け替える（2026-10-28 実測: example-game-b の行が自動の区切りの後に
+    # 「Example-game-b の NOW.md 引き継ぎ」になった。--remote-control で作った練習の行は名前どおり）。
+    # 公式資料で題名を渡す入口は --remote-control "<名前>"。前の行へつなぎ直したときは、その行の題名は変わらない
+    if remote_control_name is None and resume_session_id:
+        remote_control_name = display_name
+    # 名前が - で始まると --remote-control が値なしと読まれ、名前が別のフラグに化けるので渡さない
+    if remote_control_name and not remote_control_name.startswith("-"):
+        argv[1:1] = ["--remote-control", remote_control_name]
+    if prompt:
+        # 最初の指示は引数として渡す。TUI へ文字を流し込む必要がない。
+        # 指示が `-` で始まっても引数と誤認されないよう `--` で区切る。
+        argv += ["--", prompt]
+
+    if how == "restricted":
         # 昇格した本アプリから同じセッションへ通常権限で起こす。タスク（セッション0は S4U）だと
         # LeastPrivilege でも昇格したまま動くため（2026-10-11 本番で実測）、SAFER で絞ったトークンで起こす
-        pid = _spawn_restricted(argv, cwd)
-    elif elevation and not (same_session and own_matches):
+        pid = _spawn_restricted(argv, cwd, overrides)
+    elif how == "task-elevation":
         # 二段起動は本アプリの権限をそのまま受け継ぐため、違う権限はタスクの RunLevel で起こす
         destination = target or ("0" if current == 0 else "1")
-        pid = _spawn_via_task(argv, cwd, destination, ELEVATION_RUN_LEVELS[elevation])
-    elif not same_session:
+        pid = _spawn_via_task(
+            argv, cwd, destination, ELEVATION_RUN_LEVELS[elevation], overrides
+        )
+    elif how == "task":
         # 本アプリと別のセッションへは、使い捨てのタスク経由で起動する
-        pid = _spawn_via_task(argv, cwd, target)
+        pid = _spawn_via_task(argv, cwd, target, env_overrides=overrides)
     else:
         # ランチャー経由の二段起動。直接 Popen してはいけない
         # （本アプリの子孫になり、taskkill /F /T の巻き添えで死ぬ）。
-        pid = _spawn_detached(argv, cwd, sanitize_env())
+        # 本家でないアカウントは CLAUDE_CONFIG_DIR・HOME・USERPROFILE を足す（accounts.py）
+        pid = _spawn_detached(argv, cwd, accounts.apply_env(sanitize_env(), assigned))
 
     # 文字を送れる相手（send_to_session）を、本アプリが起こした子に限るための台帳
     record_launched(pid, display_name, cwd)
@@ -999,6 +1126,8 @@ def launch_session(
         "win_session": process_win_session(pid),
         "elevated": process_elevation(pid),
         "resumed": resume_session_id or None,
+        "account": assigned["name"],
+        "chrome": chrome,
     }
 
 
@@ -1050,7 +1179,7 @@ def is_relogin_session(session):
 def list_sessions():
     """稼働中の claude セッションの一覧を返す。
 
-    情報源は claude 自身が書いている ``~/.claude/sessions/<pid>.json`` で、
+    情報源は claude 自身が書いている ``~/.claude/sessions/<pid>.json`` とほかのアカウントの置き場の sessions で、
     本アプリは何も保持しない。したがってアプリを再起動しても、他の手段
     （PCのターミナル等）で起動されたセッションも含めて一覧できる。
 
@@ -1058,42 +1187,49 @@ def list_sessions():
         list[dict]: 更新時刻の新しい順。各要素は次のキーを持つ。
             pid / session_id / name / cwd / status / waiting_for /
             status_updated_at / started_at / updated_at /
-            url（claude.ai の画面。無ければ None）
+            url（claude.ai の画面。無ければ None）/ account（動いているアカウントの名前）
     """
-    if not os.path.isdir(SESSIONS_DIR):
-        return []
-
     sessions = []
-    for entry in os.listdir(SESSIONS_DIR):
-        if not entry.endswith(".json"):
+    seen = set()
+    for account_name, home in _account_homes():
+        sessions_dir = os.path.join(home, "sessions")
+        if not os.path.isdir(sessions_dir):
             continue
-        data = _read_session_file(os.path.join(SESSIONS_DIR, entry))
-        if not data or not is_session_alive(data) or is_relogin_session(data):
-            continue
+        for entry in os.listdir(sessions_dir):
+            if not entry.endswith(".json"):
+                continue
+            data = _read_session_file(os.path.join(sessions_dir, entry))
+            if not data or not is_session_alive(data) or is_relogin_session(data):
+                continue
+            if data.get("pid") in seen:
+                continue  # 同じ pid の生きたセッションが2つの置き場にあれば先（本家）だけ
+            seen.add(data.get("pid"))
 
-        bridge_id = data.get("bridgeSessionId")
-        sessions.append(
-            {
-                "pid": data.get("pid"),
-                "session_id": data.get("sessionId"),
-                "name": data.get("name") or "",
-                "cwd": data.get("cwd") or "",
-                "status": data.get("status") or "",
-                # status が waiting のときの待ちの種類（"permission prompt" / "input needed"
-                # 等。claude 2.1.288 の本体で確認）。それ以外のときは空
-                "waiting_for": data.get("waitingFor") or "",
-                "status_updated_at": data.get("statusUpdatedAt"),
-                "kind": data.get("kind") or "",
-                "win_session": process_win_session(data.get("pid")),
-                "started_at": data.get("startedAt"),
-                "updated_at": data.get("updatedAt"),
-                "url": (CLAUDE_WEB_BASE + bridge_id) if bridge_id else None,
-                # 本アプリが起こした子か（確認なしで文字を送れる相手か）
-                "launched_by_app": is_launched_by_app(data.get("pid")),
-                # 管理者として昇格しているか（読めなければ None）
-                "elevated": process_elevation(data.get("pid")),
-            }
-        )
+            bridge_id = data.get("bridgeSessionId")
+            sessions.append(
+                {
+                    "pid": data.get("pid"),
+                    "session_id": data.get("sessionId"),
+                    "name": data.get("name") or "",
+                    "cwd": data.get("cwd") or "",
+                    "status": data.get("status") or "",
+                    # status が waiting のときの待ちの種類（"permission prompt" / "input needed"
+                    # 等。claude 2.1.288 の本体で確認）。それ以外のときは空
+                    "waiting_for": data.get("waitingFor") or "",
+                    "status_updated_at": data.get("statusUpdatedAt"),
+                    "kind": data.get("kind") or "",
+                    "win_session": process_win_session(data.get("pid")),
+                    "started_at": data.get("startedAt"),
+                    "updated_at": data.get("updatedAt"),
+                    "url": (CLAUDE_WEB_BASE + bridge_id) if bridge_id else None,
+                    # 本アプリが起こした子か（確認なしで文字を送れる相手か）
+                    "launched_by_app": is_launched_by_app(data.get("pid")),
+                    # 管理者として昇格しているか（読めなければ None）
+                    "elevated": process_elevation(data.get("pid")),
+                    # どのアカウントで動いているか（状態ファイルを見つけた置き場で決める＝実際の値）
+                    "account": account_name,
+                }
+            )
 
     sessions.sort(key=lambda s: s.get("updated_at") or 0, reverse=True)
     return sessions
@@ -1124,14 +1260,143 @@ TRANSCRIPT_TAIL_BYTES = 256 * 1024
 
 def transcript_dir_for(cwd):
     """作業フォルダの会話記録が置かれる ``~/.claude/projects/<名前>`` を返す。
+    本家でないアカウントに割り当てた作業場は、その置き場（CLAUDE_CONFIG_DIR）の projects（accounts.py）。
 
     名前は作業フォルダのパスの英数字以外をすべて ``-`` にしたもの（2026-10-11 実測:
     ``my_app_02`` → ``my-app-02``、``AB資料`` → ``AB--``）。
     別のパスが同じ名前になりうるため、中身の cwd でも照合すること。
     """
+    return transcript_dir_in(_home_for(cwd), cwd)
+
+
+def transcript_dir_in(home, cwd):
+    """置き場 home（claude の設定フォルダ）の中の、作業フォルダ cwd の会話記録のフォルダ。"""
     return os.path.join(
-        CLAUDE_HOME, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.normpath(cwd))
+        home, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.normpath(cwd))
     )
+
+
+# 割り当ての無い作業場の既定（accounts.effective_name）は、本家に会話の記録がある作業場を本家のままにする
+accounts.set_history_probe(
+    lambda cwd: os.path.isdir(transcript_dir_in(CLAUDE_HOME, cwd))
+)
+
+
+def _is_earlier_version(old_path, new_path):
+    """old_path の中身が new_path の先頭と一字一句同じか（会話記録は追記だけで伸びる）。"""
+    old_size = os.path.getsize(old_path)
+    if old_size > os.path.getsize(new_path):
+        return False
+    chunk = 1024 * 1024
+    with open(old_path, "rb") as old, open(new_path, "rb") as new:
+        while True:
+            part = old.read(chunk)
+            if not part:
+                return True
+            if new.read(len(part)) != part:
+                return False
+
+
+def check_transcript_copy(cwd, session_id, src_home, dst_home):
+    """会話記録を src_home から dst_home へ写せるかを確かめる。
+
+    写すのは ``<sessionId>.jsonl`` と、あれば同名のフォルダ（サブエージェント・ツールの結果）。
+    先に同じ名前の記録があれば断る（上書きしない）。ただし、それがこの会話の前の版
+    （元の記録の先頭と一字一句同じ＝前にこのアカウントから写し出したときの残り）なら、
+    消さずに別の名前へよけてから写す（往復で持ち帰れるように）。
+
+    Returns:
+        (元のフォルダ, 先のフォルダ, よける名前の並び)
+
+    Raises:
+        SessionError: 番号の形が不正・元に記録が無い・別のフォルダの会話・先に違う中身の同じ名前がある
+    """
+    if not isinstance(session_id, str) or not SESSION_ID_PATTERN.fullmatch(session_id):
+        raise SessionError(f"持ち越す会話の指定が不正です: {session_id}")
+    src_dir = transcript_dir_in(src_home, cwd)
+    dst_dir = transcript_dir_in(dst_home, cwd)
+    if _same_path(src_dir, dst_dir):
+        raise SessionError(
+            "移す前と後で会話記録の置き場が同じです（設定を確かめてください）"
+        )
+    src_file = os.path.join(src_dir, f"{session_id}.jsonl")
+    if not os.path.isfile(src_file):
+        raise SessionError(f"持ち越す会話の記録が見つかりません: {src_file}")
+    if not _same_path(_summarize_transcript(src_file)["cwd"], cwd):
+        raise SessionError(f"その会話は別のフォルダのものです: {session_id}")
+    dst_file = os.path.join(dst_dir, f"{session_id}.jsonl")
+    dst_folder = os.path.join(dst_dir, session_id)
+    set_aside = []
+    if os.path.exists(dst_file):
+        if not (os.path.isfile(dst_file) and _is_earlier_version(dst_file, src_file)):
+            raise SessionError(
+                f"移す先に同じ名前で中身の違う会話の記録があります（上書きしません）: {dst_file}"
+            )
+        set_aside.append(f"{session_id}.jsonl")
+        if os.path.exists(dst_folder):
+            set_aside.append(session_id)
+    elif os.path.exists(dst_folder):
+        raise SessionError(
+            f"移す先に同じ名前のフォルダだけがあります（上書きしません）: {dst_folder}"
+        )
+    return src_dir, dst_dir, set_aside
+
+
+def copy_transcript(cwd, session_id, src_home, dst_home):
+    """会話記録を src_home から dst_home の同じ名前のフォルダへ新しく写す（元は残す）。
+
+    書きかけを見せないよう、一時の名前へ写してから付け替える。途中で失敗したら、
+    今回作った一時のものだけを片付ける。
+
+    Returns:
+        dict: ``copied``（写したファイルの数）・``set_aside``（よけた前の版の新しい名前の並び）
+
+    Raises:
+        SessionError: check_transcript_copy の理由・写すのに失敗した場合
+    """
+    try:
+        src_dir, dst_dir, set_aside = check_transcript_copy(
+            cwd, session_id, src_home, dst_home
+        )
+    except OSError as e:
+        # 呼び手の戻し（割り当てを前へ）に乗せるため、SessionError にそろえる
+        raise SessionError(f"会話の記録を読めませんでした: {e}")
+    src_folder = os.path.join(src_dir, session_id)
+    temp_file = os.path.join(dst_dir, f"{session_id}.jsonl.carrying")
+    temp_folder = os.path.join(dst_dir, f"{session_id}.carrying")
+    placed_folder = None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    moved = []  # (元の名前, よけた名前)
+    try:
+        for name in set_aside:
+            aside = os.path.join(dst_dir, f"{name}.before-carry-{stamp}")
+            os.rename(os.path.join(dst_dir, name), aside)
+            moved.append((os.path.join(dst_dir, name), aside))
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.copy2(os.path.join(src_dir, f"{session_id}.jsonl"), temp_file)
+        count = 1
+        if os.path.isdir(src_folder):
+            shutil.copytree(src_folder, temp_folder)
+            count += sum(len(files) for _, _, files in os.walk(temp_folder))
+            placed_folder = os.path.join(dst_dir, session_id)
+            os.rename(temp_folder, placed_folder)
+        # 会話の本体は最後に置く（置いた時点で --resume の候補になる）
+        os.rename(temp_file, os.path.join(dst_dir, f"{session_id}.jsonl"))
+    except OSError as e:
+        # 片付けるのは今回作ったものだけ（先に同じ名前が無いことは確かめてある）
+        if os.path.isfile(temp_file):
+            os.remove(temp_file)
+        for folder in (temp_folder, placed_folder):
+            if folder and os.path.isdir(folder):
+                shutil.rmtree(folder, ignore_errors=True)
+        # よけた前の版は元の名前へ戻す
+        for original, aside in reversed(moved):
+            try:
+                os.rename(aside, original)
+            except OSError:
+                pass
+        raise SessionError(f"会話の記録を写せませんでした: {e}")
+    return {"copied": count, "set_aside": [aside for _, aside in moved]}
 
 
 def _same_path(a, b):
@@ -1156,11 +1421,13 @@ def _summarize_transcript(path):
 
     Returns:
         dict: title / first_prompt / cwd（見つからなければ空文字）/
-        has_reply（claude の返答があるか）
+        has_reply（claude の返答があるか）/ headless（無人実行 `claude -p` の会話か。
+        利用者の行の entrypoint が "sdk-" で始まる。2026-11-02 に本物の記録で "sdk-cli"・対話は "cli" を確かめた）
     """
     title, first_prompt, cwd = "", "", ""
     relayed_prompt = ""
     has_reply = False
+    entrypoint = ""
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for _ in range(TRANSCRIPT_HEAD_LINES):
             line = f.readline()
@@ -1177,6 +1444,7 @@ def _summarize_transcript(path):
                 has_reply = True
             elif kind == "user":
                 cwd = cwd or record.get("cwd") or ""
+                entrypoint = entrypoint or str(record.get("entrypoint") or "")
                 content = (record.get("message") or {}).get("content")
                 if not isinstance(content, str):
                     continue
@@ -1211,6 +1479,7 @@ def _summarize_transcript(path):
         "first_prompt": first_prompt or relayed_prompt,
         "cwd": cwd,
         "has_reply": has_reply,
+        "headless": entrypoint.startswith("sdk-"),
     }
 
 
@@ -1262,12 +1531,15 @@ def hide_resumable(cwd, session_id):
     return True
 
 
-def list_resumable(cwd, limit=RESUMABLE_LIMIT):
+def list_resumable(cwd, limit=RESUMABLE_LIMIT, stop_at_interactive=False):
     """作業フォルダの過去の会話を、新しい順に返す（resume の候補）。
+
+    stop_at_interactive: 最初の対話の会話（headless でない）を入れたところで止める
+    （既定の続きを選ぶだけのとき。範囲と順は同じなので画面の既定の選択とずれない）。
 
     Returns:
         list[dict]: session_id / title / first_prompt / updated_at（ミリ秒）/
-        size_kb / live（いまどれかのプロセスで動いているか）
+        size_kb / live（いまどれかのプロセスで動いているか）/ headless（無人実行 `claude -p` の会話か）
     """
     folder = transcript_dir_for(cwd)
     if not os.path.isdir(folder):
@@ -1308,8 +1580,11 @@ def list_resumable(cwd, limit=RESUMABLE_LIMIT):
                 "updated_at": int(mtime * 1000),
                 "size_kb": size_kb,
                 "live": session_id in live_ids,
+                "headless": summary["headless"],
             }
         )
+        if stop_at_interactive and not summary["headless"]:
+            break
     return results
 
 
@@ -1345,7 +1620,7 @@ def validate_resume_target(cwd, session_id, ignore_pid=None):
 # --- 起動した子の台帳 -------------------------------------------------------
 
 # 本アプリの状態を置くフォルダ（AppData の外。TASK_LAUNCH_DIR の注記を参照）
-APP_STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude-web-app")
+APP_STATE_DIR = os.path.join(accounts.USER_DIR, ".claude-web-app")
 
 # ログイン更新（relogin_manager）が claude を起こす専用フォルダ。ここで動く claude は
 # 一覧・送信・取り込み・一斉指示の対象から外す（is_relogin_session）
@@ -1554,9 +1829,26 @@ def normalize_send_text(text):
     return single
 
 
+# 入力待ちとみなす状態。shell は裏の仕事（Bash・Monitor 等）を持ったまま入力を待っている状態で、
+# /clear も本文も受け付ける（2026-11-03 捨ての子で実測。裏の仕事は /clear の後も続き、
+# 終わりの知らせは新しい会話へ届く・docs/investigation_auto_compact_2026-11-03.md）
+INPUT_READY_STATUSES = ("idle", "shell")
+
+
+def is_input_ready(state):
+    """状態ファイル（または一覧の行）が入力待ちか（裏の仕事を持った入力待ちを含む）。"""
+    return bool(state) and state.get("status") in INPUT_READY_STATUSES
+
+
 def _read_state(pid):
-    """``~/.claude/sessions/<pid>.json`` を読む（無い・壊れていれば None）。"""
-    return _read_session_file(os.path.join(SESSIONS_DIR, f"{int(pid)}.json"))
+    """``<置き場>/sessions/<pid>.json`` を読む（本家→ほかのアカウントの順・無い・壊れていれば None）。"""
+    found = None
+    for home in _all_homes():
+        state = _read_session_file(os.path.join(home, "sessions", f"{int(pid)}.json"))
+        if state and is_session_alive(state):
+            return state  # 生きているものを先に（本家に残った古い json がほかのアカウントの生きた状態を隠さない）
+        found = found or state
+    return found
 
 
 def _wait_state(pid, predicate, timeout):
@@ -1672,8 +1964,10 @@ TRANSCRIPT_MATCH_CHARS = 40
 
 
 def _transcript_paths(session_id):
-    pattern = os.path.join(CLAUDE_HOME, "projects", "*", f"{session_id}.jsonl")
-    return glob.glob(pattern)
+    paths = []
+    for home in _all_homes():
+        paths += glob.glob(os.path.join(home, "projects", "*", f"{session_id}.jsonl"))
+    return paths
 
 
 def _transcript_sizes(session_id):
@@ -1800,11 +2094,31 @@ def _inbox_dir():
     return os.path.join(APP_STATE_DIR, "inbox")
 
 
-def _inbox_path(session_id, kind):
-    """受け箱のファイルのパス（kind は req / ack / alive）。"""
+def _inbox_dirs():
+    """受け箱の置き場の並び（本家が先）。
+
+    mod は子の家（USERPROFILE。無ければ HOME）の下の .claude-web-app/inbox に書く。
+    ほかのアカウントの子は家がそのアカウントの home なので、本家の置き場だけを見ると
+    alive が見えず、必ず打鍵に落ちていた（2026-10-29 account_b の example-blog で実測・011b）。
+    """
+    dirs = [_inbox_dir()]
+    seen = {os.path.normcase(os.path.abspath(dirs[0]))}
+    for account in accounts.definitions():
+        if account["main"] or account["error"] or not account.get("home"):
+            continue
+        directory = os.path.join(account["home"], ".claude-web-app", "inbox")
+        key = os.path.normcase(os.path.abspath(directory))
+        if key not in seen:
+            seen.add(key)
+            dirs.append(directory)
+    return dirs
+
+
+def _inbox_path(session_id, kind, directory=None):
+    """受け箱のファイルのパス（kind は req / ack / alive。directory を省くと本家の置き場）。"""
     if not session_id or not SESSION_ID_PATTERN.match(str(session_id)):
         raise SessionError(f"会話の番号が不正です: {session_id!r}")
-    return os.path.join(_inbox_dir(), f"{session_id}.{kind}.json")
+    return os.path.join(directory or _inbox_dir(), f"{session_id}.{kind}.json")
 
 
 def _read_json_file(path):
@@ -1832,42 +2146,63 @@ def inbox_alive(session_id):
     """
     if not session_id or not inbox_enabled():
         return None
+    found = _inbox_alive_at(session_id)
+    return found[0] if found else None
+
+
+def _inbox_alive_at(session_id):
+    """新しい alive を置き場ごとに探し、(中身, 置き場) を返す（いちばん新しいもの・無ければ None）。"""
+    best = None
     try:
-        path = _inbox_path(session_id, "alive")
-    except SessionError:
-        return None
-    data = _read_json_file(path)
-    if not data or data.get("sid") != session_id:
-        return None
-    try:
-        age = time.time() - float(data.get("at")) / 1000.0
-    except (TypeError, ValueError):
-        return None
-    # 時計のずれで少し未来になることはあるので、大きく外れたものだけ捨てる
-    if age > INBOX_ALIVE_FRESH_SEC or age < -INBOX_ALIVE_FRESH_SEC:
-        return None
-    return data
+        directories = _inbox_dirs()
+    except Exception as e:  # アカウントの設定が読めなくても本家の置き場は見る
+        safe_console.say(f"[Inbox] アカウントの置き場を読めません: {e}", flush=True)
+        directories = [_inbox_dir()]
+    for directory in directories:
+        try:
+            path = _inbox_path(session_id, "alive", directory)
+        except SessionError:
+            return None
+        data = _read_json_file(path)
+        if not data or data.get("sid") != session_id:
+            continue
+        try:
+            at = float(data.get("at"))
+        except (TypeError, ValueError):
+            continue
+        age = time.time() - at / 1000.0
+        # 時計のずれで少し未来になることはあるので、大きく外れたものだけ捨てる
+        if age > INBOX_ALIVE_FRESH_SEC or age < -INBOX_ALIVE_FRESH_SEC:
+            continue
+        if best is None or at > best[2]:
+            best = (data, directory, at)
+    return (best[0], best[1]) if best else None
 
 
 def cleanup_inbox(now=None):
     """古い受け箱のファイル（落ちた子の alive・残った ack・tmp）を片付ける。"""
     now = time.time() if now is None else now
     try:
-        names = os.listdir(_inbox_dir())
-    except OSError:
-        return 0
+        directories = _inbox_dirs()
+    except Exception:
+        directories = [_inbox_dir()]
     removed = 0
-    for name in names:
-        if not (name.endswith(".json") or name.endswith(".tmp")):
-            continue
-        path = os.path.join(_inbox_dir(), name)
+    for directory in directories:
         try:
-            if now - os.path.getmtime(path) <= INBOX_STALE_SEC:
-                continue
-            os.remove(path)
-            removed += 1
+            names = os.listdir(directory)
         except OSError:
             continue
+        for name in names:
+            if not (name.endswith(".json") or name.endswith(".tmp")):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                if now - os.path.getmtime(path) <= INBOX_STALE_SEC:
+                    continue
+                os.remove(path)
+                removed += 1
+            except OSError:
+                continue
     return removed
 
 
@@ -1998,7 +2333,7 @@ def _withdraw_inbox_req(path, data):
 INBOX_ACK_REREAD_TIMES = 3
 
 
-def _send_via_inbox(pid, session_id, clear, body, draft):
+def _send_via_inbox(pid, session_id, clear, body, draft, directory=None):
     """受け箱で /clear と本文を渡し、確かめる。
 
     mod が受け取らなかった（INBOX_QUEUE_TIMEOUT_SEC 内に ack が無い）ときは req を下げて
@@ -2015,8 +2350,12 @@ def _send_via_inbox(pid, session_id, clear, body, draft):
             （cleared・session_id_after・via の属性つき）
     """
     _maybe_cleanup_inbox()
-    req_path = _inbox_path(session_id, "req")
-    ack_path = _inbox_path(session_id, "ack")
+    # mod が alive を書いている置き場（相手のアカウントの家の下）でやり取りする
+    if directory is None:
+        found = _inbox_alive_at(session_id)
+        directory = found[1] if found else _inbox_dir()
+    req_path = _inbox_path(session_id, "req", directory)
+    ack_path = _inbox_path(session_id, "ack", directory)
     req = {
         "id": uuid.uuid4().hex,
         "clear": bool(clear),
@@ -2083,7 +2422,7 @@ def _send_via_inbox(pid, session_id, clear, body, draft):
                 if (
                     state
                     and state.get("sessionId") not in (None, session_id)
-                    and (body or state.get("status") == "idle")
+                    and (body or is_input_ready(state))
                 ):
                     new_session_id = state.get("sessionId")
                     break
@@ -2132,7 +2471,7 @@ def _send_via_inbox(pid, session_id, clear, body, draft):
         _remove_quietly(req_path)
         if new_session_id != session_id:
             # /clear の後は古い会話の alive・ack は使わない
-            _remove_quietly(_inbox_path(session_id, "alive"))
+            _remove_quietly(_inbox_path(session_id, "alive", directory))
             _remove_quietly(ack_path)
 
 
@@ -2156,7 +2495,7 @@ def send_to_session(
 
     送れる中身は「/clear」と「本文（1行・コマンドではない文）」だけで、
     任意のキー操作は送らせない。手順:
-        1. 相手が本アプリの起こした子で、入力待ち（idle）であることを確かめる。
+        1. 相手が本アプリの起こした子で、入力待ち（idle か、裏の仕事を持った入力待ちの shell）であることを確かめる。
            作業中なら wait_idle_sec 秒まで待ち、それでも作業中なら断る。
         2. clear なら、書きかけを消して /clear を打ち、会話の番号（sessionId）が
            変わって入力待ちに戻ったことを確かめる。
@@ -2222,9 +2561,9 @@ def send_to_session(
     # まだどちらの口でも打っていない間（作業中で断った等）は None
     via = None
     try:
-        if state.get("status") != "idle":
+        if not is_input_ready(state):
             state = (
-                _wait_state(pid, lambda s: s.get("status") == "idle", wait_idle_sec)
+                _wait_state(pid, is_input_ready, wait_idle_sec)
                 if wait_idle_sec
                 else None
             )
@@ -2240,14 +2579,21 @@ def send_to_session(
 
         via = "console"
         inbox_fallback = None
-        if inbox_alive(session_id_before):
+        alive_at = (
+            _inbox_alive_at(session_id_before)
+            if session_id_before and inbox_enabled()
+            else None
+        )
+        if alive_at:
             # mod が入っていれば受け箱で渡す。受け取られなければ（None）何も起きていないので打鍵で送る
+            # （alive を見つけた置き場をそのまま使う。見直す間に古くなって本家の置き場へ書かないように）
             session_id_inbox, inbox_fallback = _send_via_inbox(
                 pid,
                 session_id_before,
                 clear,
                 body,
                 draft_mode_for(managed, discard_draft, protect_draft),
+                directory=alive_at[1],
             )
             if session_id_inbox is not None:
                 via = "inbox"
@@ -2258,13 +2604,11 @@ def send_to_session(
                 # （待つ指定があれば、その残りの時間だけ入力待ちに戻るのを待つ）
                 remaining = wait_idle_sec - (time.time() - started)
                 again = _read_state(pid)
-                if again and again.get("status") != "idle" and remaining > 0:
-                    again = _wait_state(
-                        pid, lambda s: s.get("status") == "idle", remaining
-                    )
+                if again and not is_input_ready(again) and remaining > 0:
+                    again = _wait_state(pid, is_input_ready, remaining)
                 if (
                     not again
-                    or again.get("status") != "idle"
+                    or not is_input_ready(again)
                     or again.get("sessionId") != session_id_before
                 ):
                     error = SessionBusyError(
@@ -2278,8 +2622,7 @@ def send_to_session(
             _run_input_sender(pid, "/clear", keep_draft=keep_draft)
             after = _wait_state(
                 pid,
-                lambda s: s.get("sessionId") != session_id_before
-                and s.get("status") == "idle",
+                lambda s: s.get("sessionId") != session_id_before and is_input_ready(s),
                 CLEAR_CONFIRM_TIMEOUT_SEC,
             )
             if not after:

@@ -16,8 +16,9 @@
     4. 確かめ: 期限（時刻だけ）と、別の `claude -p` が1回応答するかを見る。
     5. 取り消し: ログイン用の claude を閉じる。放置しても 15 分で自動的に閉じる。
 
-資格情報（~/.claude/.credentials.json）は期限の時刻だけを読み、トークンの値は読み出さない・
-返さない。2026-10-11 時点の形: claudeAiOauth.expiresAt（短期の鍵・約8時間で自動更新）と
+資格情報（~/.claude/.credentials.json。本家でないアカウントは CLAUDE_CONFIG_DIR 直下の物）は
+期限の時刻だけを読み、トークンの値は読み出さない・返さない。期限はアカウントごとに出し、
+ログインの手続きは選んだアカウントの置き場で行う（accounts.py）。2026-10-11 時点の形: claudeAiOauth.expiresAt（短期の鍵・約8時間で自動更新）と
 claudeAiOauth.refreshTokenExpiresAt（更新に使う鍵の期限。これが切れると再ログインが要る）。
 
 前提: 本アプリは Tailscale の内側からしか開けない。その内側にいる人なら誰でも、自分の
@@ -37,8 +38,10 @@ import urllib.parse
 
 import psutil
 
+import accounts
 import session_manager as sm
 
+# 本家のアカウントの資格情報（ほかのアカウントは credentials_path で引く）
 CREDENTIALS_PATH = os.path.join(sm.CLAUDE_HOME, ".credentials.json")
 
 # ログイン用の claude を起こす専用フォルダ（session_manager が一覧・送信の対象から外す）
@@ -87,6 +90,7 @@ _state = {
     "started_at": None,
     "url": None,
     "code_sent": False,
+    "account": None,
 }
 
 
@@ -104,16 +108,35 @@ class ReloginError(Exception):
 # --- 期限 -------------------------------------------------------------------
 
 
-def read_expiry():
+def _account(name):
+    """名前からアカウントの定義（省略は本家）。使えなければ ReloginError。"""
+    try:
+        return accounts.require_usable(name or accounts.main_account()["name"])
+    except accounts.AccountError as e:
+        raise ReloginError(str(e))
+
+
+def credentials_path(account=None):
+    """そのアカウントの資格情報のファイル（account は定義。省略は本家）。"""
+    if account is None or account["main"]:
+        return CREDENTIALS_PATH
+    return os.path.join(account["config_dir"], ".credentials.json")
+
+
+def read_expiry(account=None):
     """資格情報の期限（時刻だけ）を返す。トークンの値は返さない。
+
+    Args:
+        account: アカウントの定義（省略は本家）
 
     Returns:
         dict: exists / access_expires_at / refresh_expires_at（いずれもミリ秒）/ updated_at
     """
+    path = credentials_path(account)
     try:
-        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        updated_at = int(os.path.getmtime(CREDENTIALS_PATH) * 1000)
+        updated_at = int(os.path.getmtime(path) * 1000)
     except FileNotFoundError:
         return {"exists": False}
     except (OSError, ValueError) as e:
@@ -261,6 +284,7 @@ def _clear_state():
             "started_at": None,
             "url": None,
             "code_sent": False,
+            "account": None,
         }
     )
 
@@ -280,17 +304,34 @@ def _expire_if_idle():
 
 
 def status():
-    """期限と、開いているログイン手続きの状態（画面は返さない）。"""
+    """期限（本家と、アカウントごと）と、開いているログイン手続きの状態（画面は返さない）。"""
     _expire_if_idle()
     pid = _login_pid()
+    listed = []
+    for account in accounts.definitions():
+        listed.append(
+            {
+                "name": account["name"],
+                "label": account["label"],
+                "main": account["main"],
+                "usable": not account["error"],
+                "expiry": (
+                    {"exists": False, "error": account["error"]}
+                    if account["error"]
+                    else read_expiry(account)
+                ),
+            }
+        )
     return {
         "expiry": read_expiry(),
+        "accounts": listed,
         "login": (
             {
                 "active": True,
                 "url": _state.get("url"),
                 "started_at": _state.get("started_at"),
                 "code_sent": _state.get("code_sent"),
+                "account": _state.get("account"),
             }
             if pid
             else {"active": False}
@@ -298,18 +339,23 @@ def status():
     }
 
 
-def start(claude_exe=None):
+def start(claude_exe=None, account=None):
     """ログイン用の claude を新しく起こして /login を打ち、OAuth の URL を返す。
 
     前の手続きが残っていれば閉じてから起こす（使い回すと、コードを打った後の画面や
     使用済みの URL を返してしまうため）。失敗したら起こしたものを閉じる。
 
+    Args:
+        claude_exe: claude の実行ファイル（省略は PATH）
+        account: ログインし直すアカウントの名前（省略は本家）
+
     Returns:
-        dict: url（取り出せなければ None）/ screen（URL が取れないときだけ。コードを打つ前の画面）
+        dict: url（取り出せなければ None）/ screen（URL が取れないときだけ。コードを打つ前の画面）/ account
 
     Raises:
         ReloginError: 起動・打ち込みに失敗した場合
     """
+    target = _account(account)
     with _lock:
         previous = _login_pid()
         _clear_state()
@@ -318,11 +364,13 @@ def start(claude_exe=None):
         _close_orphans()
 
         os.makedirs(RELOGIN_DIR, exist_ok=True)
-        sm.ensure_trusted(RELOGIN_DIR)
+        sm.ensure_trusted(RELOGIN_DIR, config_path=accounts.claude_json(target))
         exe = sm.resolve_claude_exe(claude_exe)
         try:
             pid = sm._spawn_detached(
-                [exe, "-n", RELOGIN_NAME], RELOGIN_DIR, sm.sanitize_env()
+                [exe, "-n", RELOGIN_NAME],
+                RELOGIN_DIR,
+                accounts.apply_env(sm.sanitize_env(), target),
             )
             create_time = psutil.Process(pid).create_time()
         except sm.SessionError as e:
@@ -336,6 +384,7 @@ def start(claude_exe=None):
                 "started_at": int(time.time() * 1000),
                 "url": None,
                 "code_sent": False,
+                "account": target["name"],
             }
         )
     # 誰も画面を開かなくても、放置された手続きは IDLE_CLOSE_SEC で閉じる
@@ -366,14 +415,14 @@ def start(claude_exe=None):
                 with _lock:
                     if _state.get("pid") == pid:
                         _state["url"] = url
-                return {"url": url, "screen": []}
+                return {"url": url, "screen": [], "account": target["name"]}
             text = "\n".join(lines).lower()
             if not pressed_method and any(m in text for m in LOGIN_METHOD_MARKERS):
                 # 方式の選択は既定（先頭＝Claude のサブスクリプション）のまま Enter で進める
                 _type(pid, "", enter=True)
                 pressed_method = True
         # URL は取れなかったが、手続きは残して画面を見せる（コードを打つ前なので画面にコードは無い）
-        return {"url": None, "screen": _tail(lines)}
+        return {"url": None, "screen": _tail(lines), "account": target["name"]}
     except Exception:
         cancel(expected_pid=pid)
         raise
@@ -404,13 +453,13 @@ def _redact(lines, code):
     return compact
 
 
-def _refresh_extended(before):
-    """更新に使う鍵の期限が before より延びたか。
+def _refresh_extended(before, account=None):
+    """更新に使う鍵の期限が before より延びたか（account は手続きのアカウントの定義）。
 
     自動更新（約8時間ごと）ではこの期限は延びない（2026-10-11 実測: 19:21 の自動更新の後も
     10-14 18:17 のまま）ので、他のセッションの自動更新と取り違えない。
     """
-    return (read_expiry().get("refresh_expires_at") or 0) > before
+    return (read_expiry(account).get("refresh_expires_at") or 0) > before
 
 
 def _failure_shown(lines):
@@ -476,8 +525,10 @@ def submit_code(code):
                 screen=tail,
             )
         _state["code_sent"] = True
+        # 期限は手続きを始めたアカウントの物で見る
+        target = accounts.get(_state.get("account")) if _state.get("account") else None
 
-    before = read_expiry().get("refresh_expires_at") or 0
+    before = read_expiry(target).get("refresh_expires_at") or 0
     try:
         _type(pid, code, enter=True)
         lines = []
@@ -485,7 +536,7 @@ def submit_code(code):
         deadline = time.time() + CODE_TIMEOUT_SEC
         while time.time() < deadline:
             time.sleep(POLL_SEC)
-            if _refresh_extended(before):
+            if _refresh_extended(before, target):
                 outcome = "ok"
                 lines = _screen(pid)
                 break
@@ -493,9 +544,9 @@ def submit_code(code):
             if _failure_shown(lines):
                 # 失敗の文言が出ても、交換が遅れて終わることがあるので期限を少し読み直す
                 grace = time.time() + FAILURE_GRACE_SEC
-                while time.time() < grace and not _refresh_extended(before):
+                while time.time() < grace and not _refresh_extended(before, target):
                     time.sleep(POLL_SEC)
-                outcome = "ok" if _refresh_extended(before) else "failed"
+                outcome = "ok" if _refresh_extended(before, target) else "failed"
                 break
         # 伏せてから末尾に絞る（絞ってからだと、貼り付け欄の行が切れて伏せが効かない）
         screen = _tail(_redact(lines, code))
@@ -504,7 +555,7 @@ def submit_code(code):
         # 成功でも失敗でも閉じる（画面にコードを残さない・使用済みの手続きを使い回させない）
         cancel(expected_pid=pid)
 
-    expiry = read_expiry()
+    expiry = read_expiry(target)
     if outcome == "ok":
         return {
             "ok": True,
@@ -545,12 +596,13 @@ def cancel(expected_pid=None):
     return True
 
 
-def check(claude_exe=None):
-    """資格情報の期限と、別の `claude -p` が1回応答するかを確かめる。
+def check(claude_exe=None, account=None):
+    """資格情報の期限と、別の `claude -p` が1回応答するかを確かめる（account は名前・省略は本家）。
 
     Returns:
-        dict: ok / reply（応答の先頭）/ error / elapsed_sec / expiry / checked_at
+        dict: ok / reply（応答の先頭）/ error / elapsed_sec / expiry / checked_at / account
     """
+    target = _account(account)
     # 確かめの claude -p は別のフォルダで動かす（「開始」が専用フォルダの取り残しを閉じるとき、
     # 確かめの最中のものまで閉じないように）
     os.makedirs(CHECK_DIR, exist_ok=True)
@@ -570,7 +622,7 @@ def check(claude_exe=None):
                 "json",
             ],
             cwd=CHECK_DIR,
-            env=sm.sanitize_env(),
+            env=accounts.apply_env(sm.sanitize_env(), target),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -609,6 +661,7 @@ def check(claude_exe=None):
         "reply": reply[:200],
         "error": error,
         "elapsed_sec": round(time.time() - started, 1),
-        "expiry": read_expiry(),
+        "expiry": read_expiry(target),
         "checked_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "account": target["name"],
     }

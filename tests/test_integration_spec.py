@@ -2,7 +2,7 @@
 """外の道具（claude-session-resumer）向けの仕様の口（GET /api/integration/spec）と設定の例の試験。
 
 実行方法:
-    <python> -m unittest discover -s tests -v
+    <python> -m pytest tests  （conftest.py の差し替えが効くよう pytest で）
 """
 
 import importlib.util
@@ -54,7 +54,11 @@ class TestIntegrationSpec(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         body = res.get_json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["spec_version"], 1)
+        self.assertEqual(body["spec_version"], 2)
+        self.assertEqual(body["launch"]["resume_default"], "latest_not_running")
+        self.assertEqual(body["launch"]["new_conversation_key"], "new")
+        self.assertEqual(body["launch"]["remote_control_key"], "remote_control")
+        self.assertEqual(body["accounts"]["move_carry_key"], "carry_session")
         self.assertEqual(body["registry"]["path"], sm.LAUNCHED_REGISTRY)
         self.assertEqual(body["registry"]["create_time_tolerance_sec"], 2.0)
         self.assertEqual(body["project_key"]["groups"], ["developing", "working"])
@@ -94,15 +98,32 @@ class TestIntegrationSpec(unittest.TestCase):
         self.assertIn(self.get("100.70.0.1").status_code, (401, 403))
 
     def test_refusal_phrases_exist_in_source(self):
-        # 断り文が出どころ（本体・session_manager の error 文）から消えていないか。
+        # 断り文が出どころ（本体・session_manager・accounts の error 文）から消えていないか。
         # 定義の行そのものは数えない
-        source = read_source("claude-web-app.py") + read_source("session_manager.py")
-        start = source.index("PRE_LAUNCH_REFUSALS = (")
-        end = source.index(")", start)
-        rest = source[:start] + source[end:]
-        for phrase in self.app.PRE_LAUNCH_REFUSALS:
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, rest)
+        source = (
+            read_source("claude-web-app.py")
+            + read_source("session_manager.py")
+            + read_source("accounts.py")
+        )
+        for name, phrases in (
+            ("PRE_LAUNCH_REFUSALS", self.app.PRE_LAUNCH_REFUSALS),
+            ("ACCOUNT_REFUSALS", self.app.ACCOUNT_REFUSALS),
+        ):
+            start = source.index(name + " = (")
+            end = source.index(")", start)
+            rest = source[:start] + source[end:]
+            for phrase in phrases:
+                with self.subTest(phrase=phrase):
+                    self.assertIn(phrase, rest)
+        # 2つの区分は重ならない（同じ文が「戻してよい」と「戻さない」の両方に当たらない）
+        self.assertFalse(
+            set(self.app.PRE_LAUNCH_REFUSALS) & set(self.app.ACCOUNT_REFUSALS)
+        )
+        body = self.get().get_json()
+        self.assertEqual(
+            body["launch"]["refused_account"]["phrases"],
+            list(self.app.ACCOUNT_REFUSALS),
+        )
         # 「すでに動いている」の文は session_manager の error 文に出る
         self.assertIn(
             self.app.ALREADY_RUNNING_PHRASE, read_source("session_manager.py")

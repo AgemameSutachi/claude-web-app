@@ -691,6 +691,30 @@ class TestRequest(_TempDir):
     def test_default_handoff_without_cwd_is_refused(self):
         self.assertEqual(self._code(self._state(cwd=""), handoff=None), ("failed", 400))
 
+    def test_default_handoff_skips_empty_now_md(self):
+        # 作成の口が置いた空の NOW.md は飛ばし、README.md の「最初の指示」を読ませる（2026-11-03）
+        folder = self._project("README.md")
+        with open(os.path.join(folder, "NOW.md"), "w", encoding="utf-8") as f:
+            f.write("\n  \n")
+        result = self._request(self._state(cwd=folder), handoff=None)
+        self.assertEqual(result["handoff"], os.path.join(folder, "README.md"))
+        self.assertEqual(result["handoff_source"], "readme")
+
+    def test_default_handoff_skips_bom_only_now_md(self):
+        folder = self._project("README.md")
+        with open(os.path.join(folder, "NOW.md"), "wb") as f:
+            f.write(b"\xef\xbb\xbf\r\n")
+        result = self._request(self._state(cwd=folder), handoff=None)
+        self.assertEqual(result["handoff_source"], "readme")
+
+    def test_default_handoff_only_empty_now_md_is_refused(self):
+        folder = self._project()
+        open(os.path.join(folder, "NOW.md"), "w", encoding="utf-8").close()
+        with self.assertRaises(sc.SelfClearError) as cm:
+            self._request(self._state(cwd=folder), handoff=None)
+        self.assertIn("中身が空", str(cm.exception))
+        self.assertEqual(sc.status()["pending"], [])
+
     def test_default_handoff_ignores_folder_named_now_md(self):
         # NOW.md という名前のフォルダはファイルでないので README.md へ回る
         folder = self._project("README.md")
@@ -880,6 +904,15 @@ class TestWatch(_TempDir):
         self.assertEqual(
             set(logged[-1]) - set(sc.PUBLIC_KEYS), {"outcome", "detail", "finished_at"}
         )
+
+    def test_sends_to_shell_status(self):
+        # 裏の仕事を持った入力待ち（shell）も入力待ちとして区切る（裏の仕事は /clear の後も続く・2026-11-03）
+        entry, send, clock = self._run(
+            lambda now: self._st("busy" if now < 5 else "shell")
+        )
+        self.assertEqual(entry["outcome"], "done")
+        self.assertTrue(send.call_args[1]["clear"])
+        self.assertGreaterEqual(clock.now, 5 + sc.IDLE_STABLE_SEC)
 
     def test_brief_idle_is_not_enough(self):
         # 3秒だけ idle になって作業へ戻る（Stop フックの差し戻し）→ その後の安定した idle で送る

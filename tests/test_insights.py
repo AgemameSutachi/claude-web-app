@@ -4,7 +4,7 @@
 本物の claude・会話記録・通知の記録には触らない。すべて一時フォルダに作った写しで試す。
 
 実行方法:
-    <python> -m unittest discover -s tests -v
+    <python> -m pytest tests  （conftest.py の差し替えが効くよう pytest で）
 """
 
 import importlib.util

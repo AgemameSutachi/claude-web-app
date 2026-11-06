@@ -15,9 +15,11 @@ import re
 import threading
 from datetime import datetime
 
+import accounts
 import safe_console
 
-APP_STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude-web-app")
+# 本家のユーザーのフォルダは既知フォルダから取る（session_manager と同じ・accounts.real_user_dir）
+APP_STATE_DIR = os.path.join(accounts.USER_DIR, ".claude-web-app")
 HISTORY_FILE = os.path.join(APP_STATE_DIR, "send_history.jsonl")
 
 # 残す本文の長さ（字数）
@@ -39,7 +41,12 @@ KIND_LABELS = {
     "self_clear": "区切りの予約",
     "auto_clear": "自動の区切りの依頼",
     "broadcast": "一斉指示",
+    "machine": "機械からの伝言",
+    "quota_resume": "枠が戻った知らせ",
 }
+
+# 1件を書くたびに呼ぶ関数（entry を受ける）。管理役への知らせ（liaison.py）が送れなかった件を拾う
+listeners = []
 
 # 秘密を表すキーの名前。pass・pwd だけは前に英字が来る語（bypass・compass）を除く。
 # apiToken・dbPassword・clientSecret のようなキャメルケースは伏せる（評価役の指摘）
@@ -179,6 +186,11 @@ def record(
                 f.write(line + "\n")
     except OSError as e:
         safe_console.say(f"[History] 送った履歴を書けませんでした: {e}", flush=True)
+    for listener in list(listeners):
+        try:
+            listener(entry)
+        except Exception as e:  # 聞き手の失敗で送信の呼び手を止めない
+            safe_console.say(f"[History] 聞き手で失敗: {e}", flush=True)
     return entry
 
 

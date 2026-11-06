@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import glob
 import html
 import ipaddress
 import os
@@ -13,6 +14,7 @@ from urllib.parse import urlencode, urlsplit
 from flask import Flask, Response, render_template, abort, redirect, request, jsonify
 from flask_socketio import SocketIO, emit
 import access_guard
+import accounts
 import project_manager as pm
 import session_manager as sm
 import broadcaster
@@ -22,6 +24,11 @@ import attention
 import send_history
 import usage_tracker
 import auto_clear
+import machine_send
+import quota_resume
+import quota_alert
+import liaison
+import transcript_tail
 import safe_console
 
 # 常駐の管理アプリ配下では PYTHONIOENCODING が無く、標準出力・標準エラーが cp932 になる。
@@ -52,12 +59,30 @@ USAGE_REFRESH_INTERVAL_SEC = 60
 
 # 許可待ちの控えの判定に使う通知の記録・使用量の集計・プロセスごとの会話の番号
 notification_log = attention.NotificationLog()
-usage = usage_tracker.UsageTracker()
+# 会話記録は、設定にあるすべてのアカウントの置き場の projects を数える（accounts.py）
+usage = usage_tracker.UsageTracker(
+    lambda: [
+        (name, os.path.join(home, "projects")) for name, home in sm._account_homes()
+    ]
+)
+# 置き場は使うたびに sm.APP_STATE_DIR から組み立てる（試験が一時の置き場へ向けられるように・2026-11-02）
 lineage = usage_tracker.SessionLineage(
-    os.path.join(sm.APP_STATE_DIR, "session_lineage.json")
+    lambda: os.path.join(sm.APP_STATE_DIR, "session_lineage.json")
 )
 # 管理下のセッションを適切なときに自動で区切る見回り（auto_clear.py）
 auto = auto_clear.AutoClear(usage, lambda cwd, sid: transcript_path_for(cwd, sid))
+# 人の手を待つこと・自動で送れなかったことの、管理役への知らせ（liaison.py。設定 liaison.tool が空なら何もしない）
+notices = liaison.Liaison(settings_loader=lambda: load_settings())
+# 枠切れで止まった子へ、枠が戻ったら続きを頼む見回り（quota_resume.py）
+quota = quota_resume.QuotaResume(
+    lambda cwd, sid: transcript_path_for(cwd, sid),
+    notifier=lambda kind, key, text: notices.notify(kind, key, text),
+)
+# 週の枠で止まった子を ntfy で人へ知らせる見回り（quota_alert.py。config/ntfy.ini が無ければ鳴らさない）
+weekly_alert = quota_alert.QuotaAlert(
+    lambda cwd, sid: transcript_path_for(cwd, sid),
+    notifier=lambda kind, key, text: notices.notify(kind, key, text),
+)
 
 # プロジェクトの親ディレクトリ絶対パスは config/settings.json の developing_dir・working_dir
 # （起動時に読む。例は config/settings.example.json）。
@@ -122,6 +147,35 @@ DEFAULT_SETTINGS = {
     "auto_clear_mode": auto_clear.DEFAULT_MODE,
     # 子に mod web-app-inbox が入っていれば受け箱で送るか（false なら必ず打鍵。送るたびに読む・再起動は要らない）
     "inbox_enabled": True,
+    # claude のアカウント（accounts.py。置き場の無い1件が本家。空なら本家だけ＝選ぶ画面を出さない）。
+    # 呼ぶたびに読む（再起動は要らない）
+    "accounts": [],
+    # 割り当てを trial_roles.json の形で書き出す先（claude-session-resumer が読む写し。空なら書かない）
+    "trial_roles_mirror": "",
+    # 写しに書くアカウント（空なら本家以外の唯一のもの）
+    "mirror_account": "",
+    # 5時間枠の使用%がこれ以上のアカウントは新しいセッションの既定にしない（accounts.py の policy。
+    # アカウントごとの five_hour_max_pct が優先。枠の大きさの比はアカウントの capacity（週）・
+    # five_hour_capacity（5時間）、5時間枠の無いアカウントは five_hour_unlimited）
+    "five_hour_max_pct": 80,
+    # 割り当ての無い作業場で起こすアカウント（空なら本家。本家に会話の記録がある作業場は本家のまま・accounts.effective_name）
+    "unassigned_account": "",
+    # 機械から子へ伝言を入れる口（POST /api/machine-send・machine_send.py）。
+    # senders: {役名: 合言葉（16文字以上）}（受けるたびに読む）。空なら口は使えない。
+    # sources: この口しか使わせない接続元の範囲（CIDR。起動時に読む・変えたら再起動）
+    "machine_send": {"senders": {}, "sources": []},
+    # 枠切れで止まった子へ、枠が戻ったら続きを頼むか（quota_resume.py）: off / dry_run（記録だけ）/ on（送る）
+    "quota_resume_mode": quota_resume.DEFAULT_MODE,
+    # 週の枠で止まった子を ntfy で人へ1通知らせるか（quota_alert.py・送り先は config/ntfy.ini）: on / off
+    "quota_alert_mode": quota_alert.DEFAULT_MODE,
+    # 許可待ち・枠切れ・自動で送れなかったことを管理役へ知らせる（liaison.py。受けるたびに読む）。
+    # tool: claude_send.py の絶対パス（空なら知らせない）
+    "liaison": {
+        "tool": "",
+        "from": liaison.DEFAULT_FROM,
+        "to": liaison.DEFAULT_TO,
+        "permission_wait_minutes": liaison.DEFAULT_PERMISSION_WAIT_MINUTES,
+    },
 }
 
 # デフォルトスニペット
@@ -240,21 +294,36 @@ def parse_allowed_hosts(value):
                 "（名前か IP だけを書く。http:// やポートは付けない）"
             )
         name = _host_name(raw)
-        # 名前は英数・-・_・. だけ（* や , を黙って通さない）。括弧は IPv6 にだけ付ける。空になる "." や "[]" も断る
+        # 名前は英数・-・_・. だけ（* や , を黙って通さない）。括弧は IPv6 にだけ付ける。空になる "." や "[]" も断る。
+        # 続くドット（a..b）と、数字とドットだけで IP として読めない形（999.1.1.1）は書き損じとして断る
         if not (
             _is_ipv6(name)
             if bracketed
-            else _is_ip(name) or _HOST_NAME_RE.fullmatch(name)
+            else _is_ip(name)
+            or (
+                _HOST_NAME_RE.fullmatch(name)
+                and ".." not in name
+                and not _NUMERIC_DOTTED_RE.fullmatch(name)
+            )
         ):
             raise ValueError(
                 f"allowed_hosts の要素が読めません: {item!r}"
-                "（名前は英数字・-・_・. だけ。[ ] は IPv6 にだけ付ける）"
+                "（名前は英数字・-・_・. だけ。角括弧（[ と ]）は IPv6 にだけ付ける。"
+                "IP は 0〜255 の4つの数（先頭に 0 を付けない）か IPv6 で書く）"
+            )
+        # どこでもない宛先（0.0.0.0・::）は Host として通すと別サイトからの手口に使われうるので断る
+        if _is_ip(name) and ipaddress.ip_address(name).is_unspecified:
+            raise ValueError(
+                f"allowed_hosts に {item!r} は書けません"
+                "（0.0.0.0・:: は待ち受けの書き方で、開く名前ではありません。この機械の IP か名前を書く）"
             )
         names.add(name)
     return frozenset(names)
 
 
 _HOST_NAME_RE = re.compile(r"[a-z0-9_](?:[a-z0-9_.-]*[a-z0-9_])?")
+# 数字とドットだけ（IP として読めなかったものは書き損じ）
+_NUMERIC_DOTTED_RE = re.compile(r"[0-9.]+")
 
 
 def _is_ip(value):
@@ -309,6 +378,8 @@ WORKING_DIR = _setting_dir(STARTUP_SETTINGS, "working_dir")
 try:
     guard = access_guard.from_settings(STARTUP_SETTINGS)
     ALLOWED_HOSTS = parse_allowed_hosts(STARTUP_SETTINGS.get("allowed_hosts"))
+    # 機械の口（/api/machine-send）だけを開ける接続元（管理側の役の容器など）
+    MACHINE_SOURCES = machine_send.sources_of(STARTUP_SETTINGS)
 except (access_guard.AccessConfigError, ValueError) as e:
     raise SystemExit(f"設定ファイル {SETTINGS_FILE} を直してから起動してください: {e}")
 # URL で渡した合言葉（?token=）をアクセスログに残さない
@@ -443,6 +514,21 @@ def _guard_request():
         if path.startswith("/api/"):
             return jsonify({"ok": False, "error": error, "code": "forbidden"}), 403
         return _page(error, status=403)
+    # 機械の口: sources の接続元には、この口のほかは何も開けない。口そのものは
+    # 送り手ごとの合言葉で口の中が確かめる（画面用の合言葉・別ページ対策の検査は掛けない。
+    # Authorization ヘッダーは別サイトのページからは事前の問い合わせなしに付けられない）
+    machine_path = machine_send.is_machine_path(path)
+    machine_source = machine_send.from_source(MACHINE_SOURCES, addr)
+    if machine_source and not machine_path:
+        safe_console.say(
+            f"[Access] refused (machine only) addr={addr} path={path}", flush=True
+        )
+        error = f"このアドレス（{addr}）からは {machine_send.PATH} だけが使えます"
+        if path.startswith("/api/"):
+            return jsonify({"ok": False, "error": error, "code": "machine_only"}), 403
+        return _page(error, status=403)
+    if machine_path and (machine_source or guard.network_allowed(addr)):
+        return None
     if guard.active and not guard.network_allowed(addr):
         safe_console.say(
             f"[Access] refused (network) addr={addr} path={path}", flush=True
@@ -589,7 +675,9 @@ def rename_project_usage(old_key, new_key):
 
     配下のサブプロジェクト（``<キー>/projects/...``）の記録もまとめて付け替える。
     移動しただけで「よく使うプロジェクト」の並び順が初期化されないようにするため。
+    アカウントの割り当ても付け替える（付け替えないと、移した先は本家で起きてしまう）。
     """
+    rename_project_account(old_key, new_key)
     usage = load_project_usage()
     if not usage:
         return
@@ -609,6 +697,26 @@ def rename_project_usage(old_key, new_key):
 
     if changed:
         save_project_usage(usage)
+
+
+def rename_project_account(old_key, new_key):
+    """プロジェクトの移動・改名で、アカウントの割り当てを新しいフォルダへ付け替える（配下も）。"""
+    old_path = resolve_project_path(old_key, must_exist=False)
+    new_path = resolve_project_path(new_key, must_exist=False)
+    if not old_path or not new_path:
+        return
+    try:
+        moved = accounts.rename_path(old_path, new_path, new_key)
+        if moved:
+            print(
+                f"[Accounts] {old_key} -> {new_key}: 割り当て {moved} 件を付け替え・固定しました",
+                flush=True,
+            )
+    except (accounts.AccountError, OSError) as e:
+        print(
+            f"[Accounts] 割り当てを付け替えられませんでした {old_key} -> {new_key}: {e}",
+            flush=True,
+        )
 
 
 def increment_project_usage(project_key):
@@ -638,7 +746,7 @@ def get_sorted_projects():
                 if (
                     os.path.isdir(full_path)
                     and not entry.startswith((".", "0_"))
-                    and entry not in ["test", "0-docker-template", "chatgpt"]
+                    and entry not in ["test"]
                 ):
                     key = f"developing/{entry}"
                     projects.append(
@@ -682,7 +790,7 @@ def get_sorted_projects():
     return projects
 
 
-def resolve_project_path(project_key):
+def resolve_project_path(project_key, must_exist=True):
     """プロジェクトキーから作業ディレクトリの絶対パスを解決する。
 
     サブプロジェクト（``developing/親/projects/子``）のような多階層キーにも対応する。
@@ -691,6 +799,7 @@ def resolve_project_path(project_key):
 
     Args:
         project_key: ``グループ名/フォルダ名[/projects/フォルダ名]`` 形式のキー
+        must_exist: False なら実在を確かめない（移す前・改名前のパスを組み立てるとき）
 
     Returns:
         検証済みの絶対パス。キーが不正または実在しない場合は None。
@@ -717,9 +826,15 @@ def resolve_project_path(project_key):
     if os.path.commonpath([base_abs, target_abs]) != base_abs:
         return None
 
-    if not os.path.isdir(target_abs):
+    if must_exist and not os.path.isdir(target_abs):
         return None
     return target_abs
+
+
+# 機械の口が宛先の project_key を作業場のパスへ直すのに使う（会話の cwd と比べるだけ）
+machine_send.project_path_resolver = lambda key: resolve_project_path(
+    key, must_exist=False
+)
 
 
 def sync_sub_projects_of(parent_key, parent_dir, prune=True):
@@ -992,11 +1107,20 @@ def api_relogin_status():
     return jsonify({"ok": True, **rl.status()})
 
 
+def _relogin_account():
+    """ボディの account（ログインし直すアカウントの名前。省略は本家）。文字列でなければ None。"""
+    payload = request.get_json(silent=True)
+    value = payload.get("account") if isinstance(payload, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 @app.route("/api/relogin/start", methods=["POST"])
 def api_relogin_start():
-    """ログイン用の claude を起こして /login を打ち、OAuth の URL を返す。"""
+    """ログイン用の claude を起こして /login を打ち、OAuth の URL を返す。
+    ボディ: ``{"account": "<アカウントの名前>"}``（省略は本家）"""
+    account = _relogin_account()
     status, body = _relogin_call(
-        "start", lambda: rl.start(load_settings().get("claude_exe"))
+        "start", lambda: rl.start(load_settings().get("claude_exe"), account)
     )
     if status == 200:
         print(
@@ -1020,9 +1144,11 @@ def api_relogin_code():
 
 @app.route("/api/relogin/check", methods=["POST"])
 def api_relogin_check():
-    """資格情報の期限と、別の claude -p が1回応答するかを確かめる。"""
+    """資格情報の期限と、別の claude -p が1回応答するかを確かめる。
+    ボディ: ``{"account": "<アカウントの名前>"}``（省略は本家）"""
+    account = _relogin_account()
     status, body = _relogin_call(
-        "check", lambda: rl.check(load_settings().get("claude_exe"))
+        "check", lambda: rl.check(load_settings().get("claude_exe"), account)
     )
     print(f"[Relogin] check ok={body.get('ok')}", flush=True)
     return jsonify(body), status
@@ -1056,6 +1182,17 @@ def api_broadcast():
     if not message:
         return (
             jsonify({"ok": False, "error": "message か preset を指定してください"}),
+            400,
+        )
+    if machine_send.forged(message):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": machine_send.FORGED_ERROR,
+                    "code": "forged_heading",
+                }
+            ),
             400,
         )
 
@@ -1186,6 +1323,16 @@ def _send_to_session(pid, payload):
                 "error": f"{key} は文字列で指定してください",
                 "code": "failed",
             }
+    # 長い本文は前置きの直後に貼り付けられ1つの発言になるので、つなげた形でも見る
+    joined = (payload.get("preamble") or "") + (payload.get("text") or "")
+    for value in (payload.get("text"), payload.get("preamble"), joined):
+        if machine_send.forged(value):
+            # 機械の口の見出しは本アプリが送り手を確かめたときだけ付ける（ほかの口から偽らせない）
+            return 400, {
+                "ok": False,
+                "error": machine_send.FORGED_ERROR,
+                "code": "forged_heading",
+            }
     target = _history_target_for_pid(pid)
     status, body = _send_checked(pid, payload)
     body["_history_target"] = target
@@ -1301,7 +1448,7 @@ def api_request_self_clear():
     そのセッションがターンを終えて入力待ちが続いたら、サーバ側から /clear と
     「…引き継ぎファイル「<handoff>」を読んで、続きから進めてください。」を送る。
     ボディ: ``{"handoff": "<引き継ぎファイルの絶対パス>", "wait_sec": 1800}``
-    （handoff を省くと会話の cwd 直下の NOW.md、無ければ README.md）
+    （handoff を省くと会話の cwd 直下の NOW.md、無いか空なら README.md）
     応答: 202 ``{"ok": true, "result": {pid, create_time, session_id, name, cwd, managed,
     handoff, handoff_source（explicit / now / readme）, requested_at, deadline}}`` / 400 failed（ボディ・handoff・wait_sec の不備）/
     403 not_self（セッションの中からの呼び出しでない）・not_main（サブエージェント等から）/
@@ -1372,6 +1519,137 @@ def api_self_clear_status():
     return jsonify({"ok": True, **self_clear.status()})
 
 
+def _machine_error(e):
+    return (
+        jsonify({"ok": False, "error": str(e), "code": e.code, **e.extra}),
+        e.status,
+    )
+
+
+def _machine_sender():
+    """合言葉（Authorization: Bearer）から送り手の役名を決める。
+
+    Returns:
+        (役名, None) か、断るとき (None, 応答)
+    """
+    try:
+        senders = machine_send.senders_of(load_settings())
+    except machine_send.MachineSendError as e:
+        # 合言葉を確かめる前なので、役名を含む詳しい文は記録にだけ出す
+        safe_console.say(f"[MachineSend] 設定が読めません: {e}", flush=True)
+        return None, _machine_error(
+            machine_send.MachineSendError(
+                "機械の口の設定（machine_send.senders）が読めません。"
+                "この機械の server.log に理由を書きました",
+                e.code,
+                e.status,
+            )
+        )
+    if guard.token and guard.token in senders.values():
+        # 画面の合言葉を知る人が送り手を名乗れてしまう
+        safe_console.say(
+            "[MachineSend] 設定が読めません: machine_send.senders に画面の合言葉（auth_token）と同じ合言葉があります",
+            flush=True,
+        )
+        return None, _machine_error(
+            machine_send.MachineSendError(
+                "機械の口の設定（machine_send.senders）が読めません。"
+                "この機械の server.log に理由を書きました",
+                "config",
+                503,
+            )
+        )
+    if not senders:
+        return None, _machine_error(
+            machine_send.MachineSendError(
+                "機械の口は使えません（設定の machine_send.senders に送り手がありません）",
+                "disabled",
+                503,
+            )
+        )
+    sender = machine_send.authenticate(senders, guard.presented_token(request.headers))
+    if not sender:
+        safe_console.say(
+            f"[MachineSend] refused (token) addr={request.remote_addr} path={request.path}",
+            flush=True,
+        )
+        return None, _machine_error(
+            machine_send.MachineSendError(
+                "送り手の合言葉が要ります（Authorization: Bearer <合言葉>）",
+                "unauthorized",
+                401,
+            )
+        )
+    return sender, None
+
+
+@app.route(machine_send.PATH, methods=["POST"])
+def api_machine_send():
+    """機械（管理側の役など）から子のセッションへ伝言を入れる。
+
+    本文の頭に「【機械からの伝言・id=…・from=…・ユーザーの発言ではありません】」を付け、
+    子が入力待ちになったところで入れる（作業中・書きかけ・入力欄が読めないときは預かる）。
+    ボディ: ``{"from": "役名", "to": {"pid": 123} | {"project_key": "…"} | {"name": "…"},
+    "id": "送り手が付ける id", "text": "本文", "ttl_sec": 3600}``
+    応答: 202 受けた（``message.status`` は pending）/ 200 同じ id を受け付け済み（duplicate）/
+    400 入力不備 / 401 合言葉 / 403 from が合言葉の役名と違う / 404 宛先が無い /
+    409 宛先が曖昧（candidates）・同じ id で別の本文 / 429 預かりが上限 / 503 口が使えない
+    """
+    sender, refused = _machine_sender()
+    if refused:
+        return refused
+    try:
+        status, body = machine_send.submit(sender, request.get_json(silent=True))
+    except machine_send.MachineSendError as e:
+        safe_console.say(
+            f"[MachineSend] refused from={sender} ({e.code}): {e}", flush=True
+        )
+        return _machine_error(e)
+    except Exception as e:
+        safe_console.say(f"Error in machine send from={sender}: {e}", flush=True)
+        return (
+            jsonify(
+                {"ok": False, "error": f"受け付けに失敗しました: {e}", "code": "error"}
+            ),
+            500,
+        )
+    return jsonify(body), status
+
+
+@app.route(machine_send.PATH + "/<msg_id>")
+def api_machine_send_status(msg_id):
+    """送り手自身の伝言1件の状態（受けた・入れた時刻と結果）。"""
+    sender, refused = _machine_sender()
+    if refused:
+        return refused
+    message = machine_send.get(sender, msg_id)
+    if not message:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"id {msg_id} の伝言はありません（自分が送ったものだけ引けます）",
+                    "code": "not_found",
+                }
+            ),
+            404,
+        )
+    return jsonify({"ok": True, "message": message})
+
+
+@app.route(machine_send.PATH)
+def api_machine_send_list():
+    """送り手自身の伝言の一覧（新しい順・?limit=50）。"""
+    sender, refused = _machine_sender()
+    if refused:
+        return refused
+    try:
+        limit = int(request.args.get("limit", 50))
+    except ValueError:
+        limit = 50
+    return jsonify({"ok": True, "messages": machine_send.list_for(sender, limit)})
+
+
 @app.route("/api/sessions/<int:pid>/adopt", methods=["POST"])
 def api_adopt_session(pid):
     """台帳に無い稼働中の子を、本アプリの子として台帳に取り込む（以後 send できる）。
@@ -1403,6 +1681,65 @@ def api_adopt_session(pid):
 def api_auto_clear_status():
     """自動の区切りの状態（設定・今回の当たり・予約待ち・残す印・直近の結果）。"""
     return jsonify({"ok": True, **auto.status()})
+
+
+@app.route("/api/sessions/<int:pid>/tail")
+def api_session_tail(pid):
+    """会話の末尾（人の発言と応答の文だけ・道具は名前だけ）を返す。会話記録を読むだけ（Claude は呼ばない）。
+
+    クエリ: limit（既定 20・上限 100）。応答: 200 ``{"ok", "pid", "name", "session_id", "items"}``
+    / 404 稼働中でない・会話記録が無い
+    """
+    session = sm.find_session_by_pid(pid)
+    if not session or sm.is_relogin_session(session):
+        return (
+            jsonify(
+                {"ok": False, "error": f"稼働中のセッションが見つかりません: pid={pid}"}
+            ),
+            404,
+        )
+    path = transcript_path_for(session.get("cwd"), session.get("session_id"))
+    try:
+        limit = int(request.args.get("limit") or transcript_tail.DEFAULT_LIMIT)
+    except ValueError:
+        return jsonify({"ok": False, "error": "limit は数で指定してください"}), 400
+    try:
+        # 起こしたばかりで会話記録がまだ無い子はよくある場面なので、失敗ではなく空で返す
+        items = transcript_tail.read_tail(path, limit) if path else []
+    except FileNotFoundError:
+        items = []
+    except OSError as e:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"会話記録を読めませんでした: {e.strerror or type(e).__name__}",
+                }
+            ),
+            500,
+        )
+    return jsonify(
+        {
+            "ok": True,
+            "pid": session.get("pid"),
+            "name": session.get("name") or "",
+            "session_id": session.get("session_id"),
+            "items": items,
+        }
+    )
+
+
+@app.route("/api/quota-resume")
+def api_quota_resume_status():
+    """枠が戻った子への続きの依頼の状態（設定・見た枠切れ・直近の結果）と、管理役への知らせの溜まり・週の枠の ntfy の知らせ。"""
+    return jsonify(
+        {
+            "ok": True,
+            **quota.status(),
+            "liaison": notices.status(),
+            "weekly_alert": weekly_alert.status(),
+        }
+    )
 
 
 def keep_request(pid, kept):
@@ -1536,6 +1873,13 @@ def handle_connect():
     if host_refused(ALLOWED_HOSTS, request.host):
         safe_console.say(
             f"[WebSocket] refused (host) addr={request.remote_addr} host={request.host}",
+            flush=True,
+        )
+        return False
+    # 機械の口の接続元（sources）には画面の操作を開けない（before_request の machine_only と同じ）
+    if machine_send.from_source(MACHINE_SOURCES, request.remote_addr):
+        safe_console.say(
+            f"[WebSocket] refused (machine only) addr={request.remote_addr}",
             flush=True,
         )
         return False
@@ -1782,6 +2126,18 @@ def handle_create_project(message):
         )
         return
 
+    # Claude in Chrome の道具（起動時にしか付かない）。起動・移しの口と同じく true は --chrome・
+    # false は --no-chrome・省けば claude の設定に従う。フォルダを作る前に形を確かめる
+    # （作ってから起動で断ると、空の作業場だけが残るため）
+    chrome = message.get("chrome")
+    if chrome is not None and not isinstance(chrome, bool):
+        emit(
+            "project_create_result",
+            {"ok": False, "error": "chrome は true か false で指定してください"},
+            room=sid,
+        )
+        return
+
     info = resolve_location(location)
     if not info:
         emit(
@@ -1793,6 +2149,30 @@ def handle_create_project(message):
             },
             room=sid,
         )
+        return
+
+    # どのアカウントで起こすか（省略は割り当ての無い作業場の既定＝unassigned_account・無ければ本家）。
+    # フォルダを作る前に、起こせるアカウントかを確かめる
+    try:
+        account_name = message.get("account") or accounts.unassigned_account()["name"]
+        if not isinstance(account_name, str):
+            raise accounts.AccountError("account は文字列で指定してください")
+        account = accounts.require_usable(account_name)
+        pending = accounts.pending_import_reason()
+        if pending and not accounts.unassigned_account()["main"]:
+            # 既定が本家でない間は、本家で作る作業場も明示の本家として台帳に書く必要がある（書けないので先に断る）
+            raise accounts.AccountError(
+                f"いまは作業場を作れません（trial_roles.json の役をまだ取り込めていません: {pending}）。"
+                "config/settings.json の accounts と trial_roles_mirror を直してから作ってください"
+            )
+        if pending and not account["main"]:
+            # 取り込みを待つ間は割り当てを書けない。フォルダを作ってから断ると行き止まりになるので先に断る
+            raise accounts.AccountError(
+                f"いまは {account['label']} を選べません（trial_roles.json の役をまだ取り込めていません: {pending}）。"
+                f"{accounts.main_account()['label']} で作るか、設定を直してから作ってください"
+            )
+    except accounts.AccountError as e:
+        emit("project_create_result", {"ok": False, "error": str(e)}, room=sid)
         return
 
     try:
@@ -1823,6 +2203,51 @@ def handle_create_project(message):
         return
 
     print(f"[Project] Created new project: {created['project_key']}")
+
+    # 作った時点で作業場にアカウントを覚える（以後は同じアカウントで起こす）。
+    # 本家なら台帳に載せない（載っていない作業場は本家）。ただし、フォルダ名がほかのアカウントの
+    # 印（取り込みで作業場へ解けなかった役の名前）に当たるときは、この作業場だけ本家と書く
+    created_path = resolve_project_path(created["project_key"])
+    try:
+        needs_record = not account["main"] or bool(
+            created_path and accounts.effective_name(created_path) != account["name"]
+        )
+    except accounts.AccountError:
+        needs_record = True
+    if needs_record:
+        try:
+            if not created_path:
+                raise accounts.AccountError("作ったフォルダが見つかりません")
+            result = accounts.assign(
+                created_path, created["project_key"], account["name"], "create"
+            )
+            if _mirror_warning(result):
+                print(f"[Accounts] {_mirror_warning(result)}", flush=True)
+                # 作成時の警告（git・NOW.md）があれば消さずに並べる
+                created["warning"] = "\n".join(
+                    w for w in (created.get("warning"), _mirror_warning(result)) if w
+                )
+        except (accounts.AccountError, OSError) as e:
+            # 割り当てを書けないまま起こすと本家で起きる。起こさずに知らせる
+            emit(
+                "project_create_result",
+                {
+                    "ok": False,
+                    "error": f"作業場（{created['project_key']}）はできましたが、{account['label']} への割り当てを"
+                    "記録できなかったので、セッションは起こしていません。"
+                    + (
+                        # 取り込み待ちの間は「移す」も断られるので、待ちが解けてからと案内する
+                        "trial_roles.json の役の取り込みが済んでから、"
+                        if "まだ取り込めていない" in str(e)
+                        else "この画面を閉じ、"
+                    )
+                    + f"プロジェクトの一覧からこの作業場を開いて「アカウントを移す」で {account['label']} を選んでください（詳細: {e}）",
+                    "project": created,
+                },
+                room=sid,
+            )
+            return
+    created["account"] = account["name"]
     emit("project_create_result", {"ok": True, "project": created}, room=sid)
 
     # 作成したプロジェクトで、そのままセッションを起動する。
@@ -1833,6 +2258,8 @@ def handle_create_project(message):
             **{key: message.get(key) for key in LAUNCH_OPTION_KEYS},
             "project": created["project_key"],
             "prompt": source_chat,
+            "account": account["name"],
+            "chrome": chrome,
         }
     )
 
@@ -2026,6 +2453,46 @@ def build_sessions_payload():
     for session in sessions:
         session["project_key"] = project_key_for_path(session.get("cwd"))
 
+    # アカウント（account は動いている置き場＝実際の値。割り当てと違えば account_expected に割り当てを出す）
+    account_list = []
+    try:
+        account_list = [account_brief(a, sessions) for a in accounts.definitions()]
+    except Exception as e:
+        print(f"Error reading accounts: {e}", flush=True)
+    try:
+        current = accounts.state()
+        for session in sessions:
+            try:
+                expected = accounts.effective_name(session.get("cwd"), current)
+            except accounts.AccountError as e:
+                # 既定の設定の誤りは行ごとに受ける（1行の誤りで残りの行の照合まで落とさない）
+                print(
+                    f"Error resolving account for {session.get('cwd')}: {e}", flush=True
+                )
+                continue
+            session["account_expected"] = (
+                expected if expected != session.get("account") else None
+            )
+    except Exception as e:
+        print(f"Error reading account assignments: {e}", flush=True)
+
+    # 枠を使い切って止まったセッション（会話記録の最後の応答が rate_limit）。どのアカウントの何の枠か・戻る時刻
+    for session in sessions:
+        try:
+            stop = accounts.quota_stop(
+                transcript_path_for(session.get("cwd"), session.get("session_id"))
+            )
+        except Exception as e:
+            print(f"Error reading quota stop: {e}", flush=True)
+            stop = None
+        session["quota_stop"] = stop
+        # 枠が戻ったときの続きの依頼の状態（画面で「自動で頼みます／頼めませんでした」を分ける）
+        session["quota_resume"] = quota.state_for(session.get("session_id"), stop)
+        # again_wait のときの、もう1回頼む時刻（HH:MM）
+        session["quota_resume_at"] = (
+            quota.again_wait_text(session.get("session_id"), stop) if stop else None
+        )
+
     # 許可待ち・答え待ち（人の手を待つもの）を判定して先頭へ並べる。
     # 判定に失敗しても一覧は出す（印が付かないだけ。理由はログへ）
     try:
@@ -2067,8 +2534,59 @@ def build_sessions_payload():
         "sessions": sessions,
         "usage_summary": usage_summary,
         "auto_clear_mode": auto_clear.config_from(settings)["mode"],
+        "quota_resume_mode": quota_resume.mode_of(settings),
+        # 管理役への知らせが有効か（画面で「管理役が扱います」と「手で送って」を分ける）
+        "liaison_enabled": notices.enabled(settings),
+        "accounts": account_list,
         "error": None,
     }
+
+
+def account_usage_view(account, usage_info):
+    """画面に出すアカウントの使用%の形（一覧と /api/accounts で共通）。
+
+    回復の時刻は accounts.format_reset の1通りで書いた文字列で渡す（画面では時刻を組み立てない）。
+    """
+    rule = accounts.policy(account)
+    over = accounts.over_detail(account, usage_info)
+    return {
+        "five_hour": usage_info["five_hour"],
+        "weekly": usage_info["weekly"],
+        "five_hour_max_pct": rule["five_hour_max_pct"],
+        "capacity": rule["capacity"],
+        "five_hour_capacity": rule["five_hour_capacity"],
+        "five_hour_unlimited": rule["five_hour_unlimited"],
+        "over_line": over["text"] if over else None,
+        "over_window": over["window"] if over else None,
+        "five_hour_resets": accounts.format_reset(
+            usage_info["five_hour"].get("resets_at")
+        ),
+        "weekly_resets": accounts.format_reset(usage_info["weekly"].get("resets_at")),
+    }
+
+
+def account_brief(account, sessions):
+    """一覧に載せるアカウントの要約（5時間枠・週の枠の使用%と回復・目安・枠の大きさ・動いている本数）。
+
+    account_b のような枠の小さいアカウントに何本まで載せられるかを、人が一覧で見て決められるように。
+    使用%が読めなくても、名前と本数は出す（1つのアカウントの失敗で一覧全体を落とさない）。
+    """
+    brief = {
+        "name": account["name"],
+        "label": account["label"],
+        "main": account["main"],
+        "running": sum(1 for s in sessions if s.get("account") == account["name"]),
+        "busy": sum(
+            1
+            for s in sessions
+            if s.get("account") == account["name"] and s.get("status") == "busy"
+        ),
+    }
+    try:
+        brief.update(account_usage_view(account, accounts.usage(account)))
+    except Exception as e:
+        print(f"Error reading usage of {account['name']}: {e}", flush=True)
+    return brief
 
 
 def transcript_path_for(cwd, session_id):
@@ -2122,6 +2640,34 @@ def auto_clear_loop():
             safe_console.say(f"Error in auto clear: {e}", flush=True)
 
 
+def watch_loop():
+    """枠が戻った子へ続きを頼み（quota_resume）、管理役への知らせを溜めて送る（liaison）常駐タスク。
+
+    誰も見ていないときも回す。どちらかの失敗でもう片方を止めない。
+    """
+    while True:
+        socketio.sleep(quota_resume.POLL_SEC)
+        settings = load_settings()
+        try:
+            sessions = annotated_sessions()
+        except Exception as e:
+            safe_console.say(f"Error listing sessions for watch: {e}", flush=True)
+            continue
+        try:
+            quota.tick(sessions, settings)
+        except Exception as e:
+            safe_console.say(f"Error in quota resume: {e}", flush=True)
+        try:
+            weekly_alert.tick(sessions, settings)
+        except Exception as e:
+            safe_console.say(f"Error in weekly quota alert: {e}", flush=True)
+        try:
+            notices.observe_sessions(sessions, settings)
+            notices.flush(settings)
+        except Exception as e:
+            safe_console.say(f"Error in liaison: {e}", flush=True)
+
+
 def broadcast_sessions():
     """接続中の全クライアントへセッション一覧を配信する。"""
     socketio.emit("sessions_list", build_sessions_payload())
@@ -2157,6 +2703,13 @@ def handle_list_sessions():
     emit("sessions_list", build_sessions_payload(), room=request.sid)
 
 
+@app.route("/api/sessions", methods=["GET"])
+def api_list_sessions():
+    """セッション一覧（画面の一覧と同じ中身。各行に account＝動いているアカウント）。"""
+    body = build_sessions_payload()
+    return jsonify({"ok": not body.get("error"), **body})
+
+
 # 起動時に画面から受け取るオプション（sm.launch_session の引数名と同じ）
 LAUNCH_OPTION_KEYS = ("model", "permission_mode", "effort", "win_session", "elevation")
 
@@ -2176,10 +2729,16 @@ def start_session_request(message, source="api"):
             "managed": True,
         }
         options = {k: message.get(k) for k in LAUNCH_OPTION_KEYS if message.get(k)}
+        if isinstance(message.get("chrome"), bool):
+            options["chrome"] = message["chrome"]
         if message.get("resume"):
             options["resume"] = message.get("resume")
+        elif body.get("auto_resumed"):
+            options.update({"resume": body.get("resumed"), "auto_resumed": True})
+        if body.get("account"):
+            options["account"] = body.get("account")
         send_history.record(
-            "resume" if message.get("resume") else "launch",
+            "resume" if message.get("resume") or body.get("auto_resumed") else "launch",
             ok=bool(body.get("ok")),
             target=target,
             text=message.get("prompt") or "",
@@ -2210,13 +2769,26 @@ def _start_session(message):
             "error": "ボディは JSON のオブジェクトにしてください",
             "code": "invalid_body",
         }
-    for key in ("project", "prompt", "resume") + LAUNCH_OPTION_KEYS:
+    for key in ("project", "prompt", "resume", "account") + LAUNCH_OPTION_KEYS:
         if message.get(key) is not None and not isinstance(message.get(key), str):
             return 400, {
                 "ok": False,
                 "error": f"{key} は文字列で指定してください",
                 "code": "invalid_body",
             }
+    for key in ("new", "remote_control", "chrome"):
+        if message.get(key) is not None and not isinstance(message.get(key), bool):
+            return 400, {
+                "ok": False,
+                "error": f"{key} は true か false で指定してください",
+                "code": "invalid_body",
+            }
+    if machine_send.forged(message.get("prompt")):
+        return 400, {
+            "ok": False,
+            "error": machine_send.FORGED_ERROR,
+            "code": "forged_heading",
+        }
     project_key = message.get("project")
     prompt = (message.get("prompt") or "").strip()
     resume_id = (message.get("resume") or "").strip() or None
@@ -2229,14 +2801,101 @@ def _start_session(message):
             "code": "project_missing",
         }
 
+    auto_resumed = False
+    with _launching_lock:
+        if not resume_id and not message.get("new"):
+            # 既定は前の会話の続き（起こし直すたびに新しい会話になり、claude.ai の一覧に
+            # 同じ名前の行が並んだため・2026-10-28 管理役の依頼）。新しい会話は new: true のときだけ
+            resume_id = latest_resumable_id(target_path)
+            auto_resumed = bool(resume_id)
+        if resume_id and _is_launching(resume_id):
+            # 二度押し・再送。既定の選択でも新しい会話へ逃がさず断る（同じ作業場に2本並べない）
+            return 409, {
+                "ok": False,
+                "error": f"その会話はいま起こしている途中です: {resume_id}。"
+                "同じ会話を2つで動かすと記録が壊れるため、起こしません"
+                "（別の会話で起こすなら new: true）",
+                "code": "failed",
+            }
+        if resume_id:
+            _launching[resume_id] = None
+    status, body = 500, {}
+    try:
+        status, body = _launch_and_wait(
+            message, project_key, target_path, prompt, resume_id, auto_resumed
+        )
+        return status, body
+    finally:
+        if resume_id:
+            with _launching_lock:
+                if body.get("code") == "not_registered" and body.get("pid"):
+                    # 登録を待ちきれなかっただけで、起こした claude は動いているかもしれない。
+                    # その pid が生きている間は控えたままにする（押し直しで2本目を起こさない）。
+                    # 開始時刻も控え、pid が別のプロセスに再利用されたら外れるようにする。
+                    # 開始時刻は起こした直後に台帳（record_launched）が取ったものを使う（登録を待つ最大45秒の間に
+                    # 死んで再利用された pid の時刻を控えないため・評価役の低）。台帳に無ければ None＝pid が生きている間控える
+                    entry = sm._load_registry().get(str(body["pid"])) or {}
+                    _launching[resume_id] = (body["pid"], entry.get("create_time"))
+                else:
+                    _launching.pop(resume_id, None)
+
+
+# 起こしている途中（状態ファイルが書かれる前）の会話の番号 → 起動中は None、登録を待ちきれなかったら
+# (起こした pid, その開始時刻)。validate_resume_target は状態ファイルで「動いている」を見るため、
+# その前は二重に起こせてしまう（評価役の指摘）
+_launching = {}
+_launching_lock = threading.Lock()
+
+
+def _is_launching(session_id):
+    """その会話を起こしている途中か（_launching_lock の中で呼ぶ）。
+
+    pid が死んでいる・別のプロセスに再利用された（開始時刻が違う）なら控えから外す
+    （再利用された pid が生きている間、既定の起動が 409 で断られ続けないように・2026-11-02）。
+    開始時刻を控えられなかったときは、今までどおり pid が生きている間は控える。
+    """
+    if session_id not in _launching:
+        return False
+    entry = _launching[session_id]
+    if entry is None:
+        return True
+    pid, created = entry if isinstance(entry, tuple) else (entry, None)
+    alive = sm.psutil.pid_exists(int(pid))
+    if alive and created is not None:
+        # 今の開始時刻が読めないときは外す側に倒す（控えの古い pid で起動を断り続けないため）
+        actual = sm._process_create_time(pid)
+        alive = (
+            actual is not None
+            and abs(actual - created) <= sm.LAUNCHED_TIME_TOLERANCE_SEC
+        )
+    if alive:
+        return True
+    _launching.pop(session_id, None)
+    return False
+
+
+def _launch_and_wait(
+    message, project_key, target_path, prompt, resume_id, auto_resumed
+):
+    """起こして claude 側の登録を待ち、(状態コード, 応答) を返す（_start_session の後半）。"""
     settings = load_settings()
+    display_name = build_session_display_name(project_key)
     try:
         started = sm.launch_session(
             cwd=target_path,
-            name=build_session_display_name(project_key),
+            name=display_name,
             prompt=pm.to_single_line(prompt) or None,
             claude_exe=settings.get("claude_exe"),
             resume_session_id=resume_id,
+            account=message.get("account") or None,
+            # claude.ai の Remote Control の行の題名。指定なしは既定（再開なら付ける・session_manager）、
+            # true なら新しい会話でも付ける、false なら付けない
+            remote_control_name={True: display_name, False: ""}.get(
+                message.get("remote_control")
+            ),
+            # true は --chrome・false は --no-chrome（Claude in Chrome の道具は起動時にしか付かない）。
+            # 省けば何も足さない（設定の claudeInChromeDefaultEnabled に従う＝今までどおり）
+            chrome=message.get("chrome"),
             **{key: message.get(key) or None for key in LAUNCH_OPTION_KEYS},
         )
     except sm.SessionError as e:
@@ -2251,11 +2910,13 @@ def _start_session(message):
 
     increment_project_usage(project_key)
     options = {k: message.get(k) for k in LAUNCH_OPTION_KEYS if message.get(k)}
+    if started.get("chrome") is not None:
+        options["chrome"] = started["chrome"]
     print(
         f"[Session] Started {project_key} (pid={started['pid']}, "
         f"trusted_now={started['trusted']}, win_session={started['win_session']}, "
         f"elevated={started['elevated']}, resumed={started['resumed']}, "
-        f"options={options})",
+        f"account={started.get('account')}, options={options})",
         flush=True,
     )
 
@@ -2277,7 +2938,13 @@ def _start_session(message):
             "code": "not_registered",
             "screen": [line for line in screen if line.strip()][-15:],
             "pid": started["pid"],
+            "account": started.get("account"),
         }
+
+    # 状態ファイルを見つけた置き場（実際のアカウント）が、起こしたアカウントと違えば知らせる
+    if started.get("account") and session.get("account") != started["account"]:
+        mismatch = f"{started['account']} で起こしましたが、{session.get('account')} の置き場に登録されました"
+        warning = f"{warning} / {mismatch}" if warning else mismatch
 
     return 200, {
         "ok": True,
@@ -2285,8 +2952,30 @@ def _start_session(message):
         "project": project_key,
         "elevated": started["elevated"],
         "resumed": started["resumed"],
+        "auto_resumed": auto_resumed,
+        "account": started.get("account"),
         "warning": warning,
     }
+
+
+def latest_resumable_id(cwd):
+    """作業場のいちばん新しい対話の会話の sessionId（動いていなければ）。無ければ None。
+
+    いちばん新しい対話の会話が動いていれば、古い会話へは戻らず新しい会話にする
+    （同じ作業場で2本目を起こすときに、ずっと前の会話を掘り起こさないため）。
+    無人実行（`claude -p`・headless）の会話は続きの候補にしない（定期の無人実行が同じ作業場で走ると、
+    対話の続きのつもりがその使い捨ての会話を起こしてしまう・2026-11-02）。手で選べば再開はできる。
+    """
+    try:
+        # 画面の一覧（list_resumable の既定の数）と同じ範囲を、同じ順で見る（画面が既定に選ぶ会話と食い違わないように）。
+        # 最初の対話の会話で止める（起動のたびに _launching_lock の中で30本を読まないため・評価役の中）
+        items = sm.list_resumable(cwd, stop_at_interactive=True)
+    except OSError:
+        return None
+    interactive = [item for item in items if not item.get("headless")]
+    if not interactive or interactive[0].get("live"):
+        return None
+    return interactive[0]["session_id"]
 
 
 @socketio.on("start_session")
@@ -2307,8 +2996,13 @@ def api_start_session():
 
     ボディ: ``{"project": "<プロジェクトキー>", "prompt": "最初の指示（省略可）",
     "model", "permission_mode", "effort", "win_session", "elevation": "admin|standard",
-    "resume": "<過去の会話の sessionId>"}``（省略した項目は既定）
-    応答: 200 ``{"ok": true, "session": {...}, "elevated", "resumed", "warning"}`` /
+    "resume": "<過去の会話の sessionId>", "account": "<アカウントの名前>", "new": false,
+    "remote_control": true, "chrome": true}``
+    （省略した項目は既定。account は作業場の割り当てと同じときだけ通る＝確かめ用。省略は割り当てどおり。
+    resume を省くと、いちばん新しい対話の会話（無人実行 claude -p を除く）が動いていなければその続きで起こす。
+    新しい会話は new: true のときだけ。
+    chrome は true で --chrome・false で --no-chrome、省けば claude の設定に従う）
+    応答: 200 ``{"ok": true, "session": {...}, "elevated", "resumed", "auto_resumed", "account", "warning"}`` /
     400 指定の不備・起動失敗 / 404 プロジェクトが無い / 502 claude 側に登録されない
     """
     status, body = start_session_request(
@@ -2336,11 +3030,24 @@ PRE_LAUNCH_REFUSALS = (
     "文字列で指定",
 )
 
+# アカウントで断ったときの 400 の error に含まれる文（accounts.py・session_manager.launch_session）。
+# 起こしていないが、PRE_LAUNCH_REFUSALS と違い「ほかの道で起こしてよい」ではない
+# （外の道具が自分の道で起こすと、割り当てと違うアカウント＝多くは本家で起きてしまう）
+ACCOUNT_REFUSALS = (
+    "に割り当てられています",
+    "の設定が使えません",
+    "は設定にありません",
+    "割り当ての台帳",
+    "アカウントの設定ファイル",
+    "まだ取り込めていない",
+)
+
 # 再開を頼んだ会話がすでに動いていたときの 400 の error に含まれる文（起こしていない・動いている）
 ALREADY_RUNNING_PHRASE = "その会話はいま動いています"
 
 # 下の仕様の版。項目を消す・意味を変えるときに上げる（足すだけなら上げない）
-INTEGRATION_SPEC_VERSION = 1
+# 2: POST /api/sessions で resume を省いたときの既定が「新しい会話」から「続き」に変わった（2026-10-28）
+INTEGRATION_SPEC_VERSION = 2
 
 
 def integration_spec():
@@ -2376,6 +3083,15 @@ def integration_spec():
         "launch": {
             "endpoint": "POST /api/sessions",
             "option_keys": list(LAUNCH_OPTION_KEYS),
+            # resume を省くと、いちばん新しい対話の会話が動いていなければその続き。新しい会話は new: true。
+            # 無人実行（claude -p）の会話は除く（値は版 2 のまま。除くものは resume_default_excludes）
+            "resume_default": "latest_not_running",
+            "resume_default_excludes": ["headless"],
+            "new_conversation_key": "new",
+            # true で claude.ai の Remote Control の行の題名（フォルダ名）を --remote-control で渡す
+            "remote_control_key": "remote_control",
+            # true で --chrome・false で --no-chrome（Claude in Chrome の道具）。省けば claude の設定に従う
+            "chrome_key": "chrome",
             "model": values("model"),
             "permission_mode": values("permission_mode"),
             "effort": values("effort"),
@@ -2386,9 +3102,21 @@ def integration_spec():
                 "status_400_phrases": list(PRE_LAUNCH_REFUSALS),
             },
             "already_running": {"status": 400, "phrase": ALREADY_RUNNING_PHRASE},
+            # 起こしていない・ほかの道で起こさない（割り当てたアカウントでしか起こせない）
+            "refused_account": {
+                "status": 400,
+                "phrases": list(ACCOUNT_REFUSALS),
+            },
         },
         "adopt": {"endpoint": "POST /api/sessions/<pid>/adopt"},
         "resumable": {"endpoint": "GET /api/projects/resumable?project=<key>"},
+        "accounts": {
+            "endpoint": "GET /api/accounts",
+            "move": "POST /api/accounts/move",
+            "move_carry_key": "carry_session",
+            "assignments_path": accounts.STATE_PATH,
+            "launch_key": "account",
+        },
     }
 
 
@@ -2396,6 +3124,410 @@ def integration_spec():
 def api_integration_spec():
     """外の道具（claude-session-resumer）が写している仕様を JSON で返す（読むだけ）。"""
     return jsonify(integration_spec())
+
+
+# --- アカウント（accounts.py） -------------------------------------------------
+
+# アカウントを移した後の最初の一言の既定（会話を持ち越さない移し。新しい会話なので引き継ぎを読ませる）
+MOVE_DEFAULT_PROMPT = (
+    "アカウントを {label} へ移して起こし直しました。前の会話は持ち越していません。"
+    "このフォルダの NOW.md（無いか空なら README.md）を読んで、続きから進めてください。"
+)
+
+# 会話を持ち越したとき（carry_session）の最初の一言
+MOVE_CARRY_PROMPT = (
+    "アカウントを {label} へ移して、同じ会話を続きから起こし直しました。"
+    "途中だった作業があれば続けてください。返事は不要です。"
+)
+
+_move_lock = threading.Lock()
+
+
+def accounts_overview():
+    """アカウントの一覧・使用%（週の枠・5時間枠）・新規作成の既定・割り当て・写しの状態。"""
+    listed = []
+    usages = {}
+    for account in accounts.definitions():
+        usage_info = accounts.usage(account)
+        usages[account["name"]] = usage_info
+        listed.append(
+            {
+                "name": account["name"],
+                "label": account["label"],
+                "main": account["main"],
+                "usable": not account["error"],
+                "error": account["error"],
+                **account_usage_view(account, usage_info),
+            }
+        )
+    default_name, default_reason = accounts.default_choice(usages)
+    try:
+        current = accounts.state()
+        assignments = [
+            {
+                "project_key": e.get("project_key")
+                or project_key_for_path(e.get("path")),
+                "path": e.get("path"),
+                "account": e.get("account"),
+                "updated_at": e.get("updated_at"),
+                "by": e.get("by"),
+            }
+            for e in current["assignments"].values()
+        ]
+        legacy = current.get("legacy_names") or {}
+        mirror = accounts.mirror_status(current)
+        pending = current.get("pending_import") or None
+        state_error = None
+    except accounts.AccountError as e:
+        assignments, legacy, mirror, pending, state_error = [], {}, None, None, str(e)
+    return {
+        "ok": state_error is None,
+        # trial_roles.json の役を取り込めずに待っている理由（この間は本家以外へ割り当てられない）
+        "pending_import": pending,
+        "accounts": listed,
+        "default": default_name,
+        "default_reason": default_reason,
+        "assignments": sorted(assignments, key=lambda a: a["project_key"] or ""),
+        "legacy_names": legacy,
+        "mirror": mirror,
+        "error": state_error,
+    }
+
+
+@app.route("/api/accounts")
+def api_accounts():
+    """アカウントの一覧と週次の使用%（取れなければ known: false と理由）・既定・割り当て。
+
+    ``?project=<キー>`` を付けると、その作業場の割り当て（``project``）も返す。
+    """
+    body = accounts_overview()
+    project_key = request.args.get("project")
+    if project_key:
+        path = resolve_project_path(project_key)
+        if not path:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": f"プロジェクトが見つかりません: {project_key}",
+                    }
+                ),
+                404,
+            )
+        try:
+            name, reason = accounts.resolve(path)
+            body["project"] = {
+                "project_key": project_key,
+                "account": name,
+                # assigned: 台帳に行がある（本家と明示した行も含む）。reason は accounts.resolve の理由
+                "assigned": reason in ("assigned", "explicit_main", "legacy"),
+                "reason": reason,
+            }
+        except accounts.AccountError as e:
+            # 既定の設定の誤りなどで行き先を決められない。一覧ごと落とさず、作業場の欄に理由を載せる
+            # （開始画面に「なぜ起こせないか」を押す前に出すため。起動は session_manager が同じ理由で断る）
+            body["project"] = {
+                "project_key": project_key,
+                "account": None,
+                "assigned": False,
+                "reason": "error",
+                "error": str(e),
+            }
+    return jsonify(body), 200 if body["ok"] else 500
+
+
+def find_role_folders(name):
+    """役の名前（フォルダ名・小文字）に当たる作業場 [(パス, プロジェクトキー)]（trial_roles の取り込み用）。
+
+    developing・working の直下と、その下の projects/ の直下を探す。
+    """
+    found = []
+    for group, base_dir in (("developing", DEVELOPING_DIR), ("working", WORKING_DIR)):
+        if not base_dir or not os.path.isdir(base_dir):
+            continue
+        for pattern in ("*", os.path.join("*", pm.PROJECTS_SUBDIR, "*")):
+            for folder in glob.glob(os.path.join(base_dir, pattern)):
+                if os.path.isdir(folder) and accounts.folder_name(folder) == name:
+                    key = project_key_for_path(folder)
+                    if key:
+                        found.append((os.path.abspath(folder), key))
+    return found
+
+
+# 台帳が無いまま割り当てを引かれたら、その場で写しの役を取り込めるようにする
+accounts.set_role_resolver(find_role_folders)
+
+
+def _mirror_warning(result):
+    """割り当ての結果から、写し（trial_roles.json）を書けなかった警告の文（無ければ None）。"""
+    error = (result or {}).get("mirror", {}).get("error")
+    return f"claude-session-resumer 用の trial_roles.json: {error}" if error else None
+
+
+def _sessions_in(path):
+    """作業場（そのフォルダちょうど）で動いているセッション。"""
+    return [s for s in sm.list_sessions() if sm._same_path(s.get("cwd") or "", path)]
+
+
+def move_account_request(message, source="api"):
+    """作業場のアカウントを移す: 割り当てを書き換え → 動いているものを止める → 移す先で起こす。
+
+    ボディ: ``{"project", "account": "<移す先>", "prompt": "起こし直しの最初の一言（省略で既定の文）",
+    "launch": true（false なら起こさない）, "force": false（作業中でも止める）,
+    "carry_session": false（true なら会話を持ち越す）, "model" ほか起動オプション}``
+
+    carry_session が真なら、動いている会話（無ければいちばん新しい会話）の記録を移す先の置き場の
+    同じ名前のフォルダへ新しく写し（元は残す）、同じ sessionId で --resume して起こす。
+    移す先に同じ名前の記録が既にあれば、何も変えずに断る。ただしそれが同じ会話の前の版
+    （前に移す先から写し出したときの残り）なら、``.before-carry-<日時>`` へよけてから写す（set_aside）。
+
+    応答: 200 ``{"ok": true, "previous", "account", "stopped": [pid...], "session", "mirror",
+    "pid", "session_id", "carried", "copied_files"}`` /
+    400 指定の不備・同じアカウント・持ち越す会話が無い / 404 プロジェクトが無い /
+    409 作業中（force で押し切れる）・移し中・持ち越す相手が2本以上・移す先に同じ記録 /
+    502 止めたが写せなかった（割り当ては前に戻す）・止めたが起こせなかった（割り当ては移したまま）
+    """
+    if not isinstance(message, dict):
+        return 400, {"ok": False, "error": "ボディは JSON のオブジェクトにしてください"}
+    for key in ("project", "account", "prompt") + LAUNCH_OPTION_KEYS:
+        if message.get(key) is not None and not isinstance(message.get(key), str):
+            return 400, {"ok": False, "error": f"{key} は文字列で指定してください"}
+    if machine_send.forged(message.get("prompt")):
+        return 400, {
+            "ok": False,
+            "error": machine_send.FORGED_ERROR,
+            "code": "forged_heading",
+        }
+    for key in ("force", "launch", "carry_session", "remote_control", "chrome"):
+        # "false" のような文字列を真と取り違えて止める・起こすことがないように
+        if message.get(key) is not None and not isinstance(message.get(key), bool):
+            return 400, {
+                "ok": False,
+                "error": f"{key} は true か false で指定してください",
+            }
+    project_key = message.get("project")
+    path = resolve_project_path(project_key)
+    if not path:
+        return 404, {
+            "ok": False,
+            "error": f"プロジェクトが見つかりません: {project_key}",
+        }
+    try:
+        target = accounts.require_usable(message.get("account") or "")
+        previous, previous_reason = accounts.resolve(path)
+    except accounts.AccountError as e:
+        return 400, {"ok": False, "error": str(e)}
+    if previous == target["name"]:
+        if previous_reason == "default":
+            return 400, {
+                "ok": False,
+                "error": f"{project_key} は割り当てが無く、既定（unassigned_account）でもう {target['label']} で起きます"
+                "（最初に起こしたときに割り当てとして書きます）",
+            }
+        return 400, {
+            "ok": False,
+            "error": f"{project_key} はもう {target['label']} に割り当てられています",
+        }
+    if not _move_lock.acquire(blocking=False):
+        return 409, {
+            "ok": False,
+            "error": "ほかのアカウントの移しが進行中です。終わってから送り直してください",
+        }
+    try:
+        running = _sessions_in(path)
+        busy = [s for s in running if s.get("status") == "busy"]
+        if busy and not message.get("force"):
+            return 409, {
+                "ok": False,
+                "code": "busy",
+                "error": f"作業中のセッションがあります（PID {', '.join(str(s['pid']) for s in busy)}）。"
+                "終わってから移すか、作業中でも止めて移してください（API では force: true）",
+            }
+        carry = bool(message.get("carry_session"))
+        carried_id = None
+        if carry:
+            # 写せるかは、何も変える前に確かめる（割り当て・停止の前）
+            if len(running) > 1:
+                return 409, {
+                    "ok": False,
+                    "code": "ambiguous",
+                    "error": f"この作業場で {len(running)} 本動いているため、どの会話を持ち越すか決められません"
+                    f"（PID {', '.join(str(s['pid']) for s in running)}）。1本にしてから送り直してください",
+                }
+            # 割り当てを書き換える前なので、前のアカウントの置き場から探す
+            carried_id = (
+                running[0].get("session_id") if running else latest_resumable_id(path)
+            )
+            if not carried_id:
+                return 400, {
+                    "ok": False,
+                    "error": f"{project_key} に持ち越せる会話がありません（何も変えていません。"
+                    "無人実行 claude -p の会話は持ち越しの候補にしません）。"
+                    "carry_session を外せば新しい会話で移せます",
+                }
+            try:
+                src_home = accounts.claude_home(
+                    accounts.require_usable(previous), sm.CLAUDE_HOME
+                )
+                dst_home = accounts.claude_home(target, sm.CLAUDE_HOME)
+                sm.check_transcript_copy(path, carried_id, src_home, dst_home)
+            except (sm.SessionError, accounts.AccountError, OSError) as e:
+                return 409, {
+                    "ok": False,
+                    "code": "carry_refused",
+                    "error": f"会話を持ち越せません（何も変えていません）: {e}。"
+                    "会話を持ち越さずに移すなら carry_session を外してください"
+                    "（/clear の直後でまだ記録が無いときもこれになります）",
+                }
+        # 1. 割り当てを書き換える（ここから先は移す先で起きる）
+        try:
+            assigned = accounts.assign(path, project_key, target["name"], "move")
+        except accounts.AccountError as e:
+            # 取り込み待ち・設定の誤りなど、直すまで何度送っても同じ（何も止めていない）
+            return 400, {"ok": False, "error": f"移せません（何も止めていません）: {e}"}
+        except OSError as e:
+            return 500, {
+                "ok": False,
+                "error": f"割り当てを書けませんでした（何も止めていません）: {e}",
+            }
+        # 持ち越すときは、元と同じモデル・モード・思考の深さで起こす（止める前に読む）
+        carried_options = (
+            sm.launch_options_of(running[0]["pid"]) if carry and running else {}
+        )
+        # 2. 動いているものを止める
+        stopped, stop_errors = [], []
+        for s in running:
+            try:
+                sm.stop_session(s["pid"])
+                stopped.append(s["pid"])
+            except sm.SessionError as e:
+                # 一覧を取ってから止めるまでに自分で終わったものは、止まったものとして扱う
+                if sm.find_session_by_pid(s["pid"]) is None:
+                    stopped.append(s["pid"])
+                    continue
+                stop_errors.append(f"PID {s['pid']}: {e}")
+        if stop_errors:
+            # 止められないまま起こすと、同じ作業場で2つのアカウントが動く。割り当ては前へ戻す
+            try:
+                accounts.assign(path, project_key, previous, "move-rollback")
+            except (accounts.AccountError, OSError) as e:
+                stop_errors.append(f"割り当ても戻せませんでした: {e}")
+            return 502, {
+                "ok": False,
+                "error": "動いているセッションを止められなかったので、移すのをやめました（割り当ては前に戻しました）: "
+                + " / ".join(stop_errors),
+                "stopped": stopped,
+            }
+        result = {
+            "ok": True,
+            "project": project_key,
+            "previous": previous,
+            "account": target["name"],
+            "stopped": stopped,
+            "mirror": assigned["mirror"],
+            "session": None,
+            "warning": _mirror_warning(assigned),
+            "pid": None,
+            "session_id": None,
+            "carried": None,
+            "copied_files": 0,
+            "set_aside": [],
+        }
+        if carry:
+            # 3a. 会話の記録を移す先の置き場へ新しく写す（止めた後なので記録はもう伸びない）
+            try:
+                copied = sm.copy_transcript(path, carried_id, src_home, dst_home)
+                result["copied_files"] = copied["copied"]
+                result["set_aside"] = copied["set_aside"]
+            except sm.SessionError as e:
+                # 写せないまま移す先で起こすと白紙の会話になる。割り当てを前へ戻し、前で続けられるようにする
+                rollback = ""
+                try:
+                    accounts.assign(path, project_key, previous, "move-rollback")
+                except (accounts.AccountError, OSError) as e2:
+                    rollback = f"（割り当ても戻せませんでした: {e2}）"
+                result.update(
+                    {
+                        "ok": False,
+                        "error": f"前のセッションは止めましたが、会話の記録を写せませんでした: {e}。"
+                        f"割り当ては前に戻しました{rollback}。resume: {carried_id} で起こせば前のアカウントで続きから動きます",
+                    }
+                )
+                return 502, result
+            result["carried"] = carried_id
+        if message.get("launch", True) is False:
+            return 200, result
+        # 3. 移す先で起こす。持ち越すなら同じ会話の続き、持ち越さないなら新しい会話
+        # （移す先に前の会話が残っていても、黙ってそれを続けない）。前の起動先セッションは引き継ぐ
+        default_prompt = MOVE_CARRY_PROMPT if carry else MOVE_DEFAULT_PROMPT
+        prompt = (message.get("prompt") or "").strip() or default_prompt.format(
+            label=target["label"]
+        )
+        launch = {
+            **carried_options,
+            **{k: message.get(k) for k in LAUNCH_OPTION_KEYS if message.get(k)},
+            "project": project_key,
+            "prompt": prompt,
+            "account": target["name"],
+        }
+        if message.get("chrome") is not None:
+            # 明示した chrome は持ち越した値（元の --chrome）より勝つ
+            launch["chrome"] = message.get("chrome")
+        if carry:
+            launch["resume"] = carried_id
+            # 別アカウントの resume は claude.ai に新しい行を作る。題名を渡さないと自動の名前になる
+            launch["remote_control"] = message.get("remote_control", True)
+        else:
+            launch["new"] = True
+        if (
+            not launch.get("win_session")
+            and running
+            and running[0].get("win_session") is not None
+        ):
+            launch["win_session"] = str(running[0]["win_session"])
+        status, body = start_session_request(launch, source=source)
+        result["session"] = body.get("session")
+        session = body.get("session") or {}
+        result["pid"] = session.get("pid") or body.get("pid")
+        result["session_id"] = session.get("session_id")
+        warnings = [w for w in (result["warning"], body.get("warning")) if w]
+        result["warning"] = " / ".join(warnings) or None
+        if status != 200:
+            result.update(
+                {
+                    "ok": False,
+                    "error": f"割り当ては {target['label']} へ移し、前のセッションも止めましたが、"
+                    f"起こせませんでした: {body.get('error')}。原因を直してから「セッションを開始」で起こせば、"
+                    f"{target['label']} で起きます（割り当ては移っています）"
+                    + (
+                        f"。claude.ai の行の題名を渡す --remote-control が原因かもしれません。外すなら "
+                        f"POST /api/sessions に resume: {carried_id}・remote_control: false を付けて起こせます"
+                        f"（そのときは一覧の名前が自動の名前になります）"
+                        if launch.get("remote_control")
+                        else ""
+                    ),
+                    "screen": body.get("screen"),
+                }
+            )
+            return 502, result
+        return 200, result
+    finally:
+        _move_lock.release()
+
+
+@app.route("/api/accounts/move", methods=["POST"])
+def api_move_account():
+    """作業場のアカウントを移す（管理役・画面の両方から。管理者の札は要らない）。"""
+    status, body = move_account_request(
+        request.get_json(silent=True), source=_request_source()
+    )
+    print(
+        f"[Accounts] move {body.get('project')} {body.get('previous')} -> "
+        f"{body.get('account')} ok={body.get('ok')} stopped={body.get('stopped')}",
+        flush=True,
+    )
+    broadcast_sessions()
+    return jsonify(body), status
 
 
 def resumable_request(project_key):
@@ -2564,6 +3696,19 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Failed to initialize project database: {e}")
 
+    # アカウントの割り当ての台帳が無ければ、写し（trial_roles.json）から一度だけ作る
+    try:
+        report = accounts.import_trial_roles(find_role_folders)
+        print(f"[Accounts] import: {report}", flush=True)
+        note = accounts.refresh_mirror_note()
+        if note.get("written") or note.get("error"):
+            print(f"[Accounts] 写しの注記: {note}", flush=True)
+        mirror = accounts.mirror_status()
+        if mirror.get("in_sync") is False:
+            print(f"[Accounts] trial_roles.json が台帳と違います: {mirror}", flush=True)
+    except Exception as e:
+        print(f"[Accounts] 台帳の準備に失敗しました: {e}", flush=True)
+
     # セッション一覧の定期配信を開始する（状態 idle/busy の追従用）
     socketio.start_background_task(sessions_poll_loop)
 
@@ -2572,6 +3717,17 @@ if __name__ == "__main__":
 
     # 管理下のセッションの自動の区切り（設定 auto_clear_mode。既定は dry_run＝記録だけ）
     socketio.start_background_task(auto_clear_loop)
+
+    # 枠が戻った子への続きの依頼・管理役への知らせ（自動の送信の失敗は送った履歴から拾う）
+    send_history.listeners.append(notices.on_history)
+    socketio.start_background_task(watch_loop)
+
+    # 機械の口の預かり（再起動の前に受けて、まだ入れていないもの）の続きを入れる
+    try:
+        if machine_send.ensure_worker():
+            print("[MachineSend] 預かりの続きを入れ始めました", flush=True)
+    except Exception as e:
+        print(f"[MachineSend] 預かりを読めませんでした: {e}", flush=True)
 
     # ホスト・ポートは config/settings.json から読み込む（他アプリとのポート競合時に編集可能）。
     # 外（Tailscale）から開くときは host を 0.0.0.0 にし、allowed_networks・auth_token で絞る。
@@ -2598,6 +3754,14 @@ if __name__ == "__main__":
         print(
             f" [注意] ループバック以外で待ち受けていて、合言葉（auth_token）がありません。"
             f"{reach}セッションを操作できます（README の「安全のための注意」）"
+        )
+    if MACHINE_SOURCES:
+        print(f" Machine-send sources: {[str(n) for n in MACHINE_SOURCES]}")
+    broad = machine_send.broad_sources(MACHINE_SOURCES)
+    if broad:
+        print(
+            f" [注意] machine_send.sources に広い範囲があります: {[str(n) for n in broad]}。"
+            "この範囲の接続元は画面もほかの API も使えません（送り手の機械を1台ずつ /32 で書く）"
         )
     for label, path in (
         ("developing_dir", DEVELOPING_DIR),

@@ -115,7 +115,10 @@ class TestSubmitCode(unittest.TestCase):
         self.refresh = [1000]
         rl._login_pid = lambda: 4242
         rl._type = lambda pid, text, enter=True: self.typed.append(text)
-        rl.read_expiry = lambda: {"exists": True, "refresh_expires_at": self.refresh[0]}
+        rl.read_expiry = lambda account=None: {
+            "exists": True,
+            "refresh_expires_at": self.refresh[0],
+        }
         rl.cancel = (
             lambda expected_pid=None: self.cancelled.append(expected_pid) or True
         )
@@ -193,7 +196,7 @@ class TestSubmitCode(unittest.TestCase):
         rl._screen = screen
         rl.FAILURE_GRACE_SEC = 0.3
         original_read = rl.read_expiry
-        rl.read_expiry = lambda: (
+        rl.read_expiry = lambda account=None: (
             calls.append(1),
             {"exists": True, "refresh_expires_at": self.refresh[0]},
         )[1]
@@ -287,7 +290,7 @@ class TestStart(unittest.TestCase):
         rl.cancel = (
             lambda expected_pid=None: self.cancelled.append(expected_pid) or True
         )
-        sm.ensure_trusted = lambda path: False
+        sm.ensure_trusted = lambda path, config_path=None: False
         sm.resolve_claude_exe = lambda configured=None: sys.executable
         sm._spawn_detached = lambda argv, cwd, env: os.getpid()
 

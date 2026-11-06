@@ -217,3 +217,5 @@ config/projects.db
 config/settings.json
 # 使っていない古い設定（トークンを含むため追跡しない）
 config/slackapi.ini
+# ntfy の送り先（トピック名とトークンは鍵そのもの・quota_alert.py）
+config/ntfy.ini
